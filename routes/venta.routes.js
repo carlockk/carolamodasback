@@ -396,7 +396,7 @@ router.post('/', async (req, res) => {
   try {
     session.startTransaction();
 
-    const { productos, total, tipo_pago, tipo_pedido } = req.body;
+    const { productos, total, tipo_pago, tipo_pedido, monto_recibido, vuelto } = req.body;
     const tipoPago = sanitizeText(tipo_pago, { max: 30 });
     const tipoPedido = sanitizeOptionalText(tipo_pedido, { max: 40 }) || '';
 
@@ -415,6 +415,26 @@ router.post('/', async (req, res) => {
     const totalNumerico = Number(total);
     if (Number.isNaN(totalNumerico) || totalNumerico < 0) {
       const error = new Error('El total de la venta es inválido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const montoRecibidoNumerico =
+      monto_recibido === null || monto_recibido === undefined || monto_recibido === ''
+        ? null
+        : Number(monto_recibido);
+    if (montoRecibidoNumerico !== null && (Number.isNaN(montoRecibidoNumerico) || montoRecibidoNumerico < 0)) {
+      const error = new Error('El monto recibido es inválido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const vueltoNumerico =
+      vuelto === null || vuelto === undefined || vuelto === ''
+        ? null
+        : Number(vuelto);
+    if (vueltoNumerico !== null && Number.isNaN(vueltoNumerico)) {
+      const error = new Error('El vuelto es inválido.');
       error.status = 400;
       throw error;
     }
@@ -529,6 +549,8 @@ router.post('/', async (req, res) => {
       total: totalNumerico,
       tipo_pago: tipoPago,
       tipo_pedido: tipoPedido,
+      monto_recibido: montoRecibidoNumerico,
+      vuelto: vueltoNumerico,
       fecha: new Date(),
       numero_pedido: Math.floor(Math.random() * 100),
       local: req.localId,

@@ -29,6 +29,8 @@ const ventaSchema = new mongoose.Schema({
   total: Number,
   tipo_pago: String,
   tipo_pedido: String,
+  monto_recibido: { type: Number, default: null },
+  vuelto: { type: Number, default: null },
   origen_cobro: { type: String, default: 'pos' },
   mesa_numero: { type: Number, default: null },
   cobrador_nombre: { type: String, default: '' },

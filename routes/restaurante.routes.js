@@ -736,8 +736,26 @@ router.post('/caja/cobrar/:id', async (req, res) => {
 
     const tipoPago = sanitizeText(req.body?.tipo_pago, { max: 30 });
     const tipoPedidoInput = sanitizeOptionalText(req.body?.tipo_pedido, { max: 40 }) || '';
+    const montoRecibidoInput = req.body?.monto_recibido;
+    const vueltoInput = req.body?.vuelto;
     if (!tipoPago) {
       return res.status(400).json({ error: 'Tipo de pago requerido' });
+    }
+
+    const montoRecibido =
+      montoRecibidoInput === null || montoRecibidoInput === undefined || montoRecibidoInput === ''
+        ? null
+        : Number(montoRecibidoInput);
+    if (montoRecibido !== null && (Number.isNaN(montoRecibido) || montoRecibido < 0)) {
+      return res.status(400).json({ error: 'Monto recibido invalido' });
+    }
+
+    const vuelto =
+      vueltoInput === null || vueltoInput === undefined || vueltoInput === ''
+        ? null
+        : Number(vueltoInput);
+    if (vuelto !== null && Number.isNaN(vuelto)) {
+      return res.status(400).json({ error: 'Vuelto invalido' });
     }
 
     const cajaAbierta = await Caja.findOne({ cierre: null, local: req.localId });
@@ -784,6 +802,8 @@ router.post('/caja/cobrar/:id', async (req, res) => {
       total,
       tipo_pago: tipoPago,
       tipo_pedido: tipoPedido,
+      monto_recibido: montoRecibido,
+      vuelto,
       origen_cobro: 'caja_restaurante',
       mesa_numero: Number(comanda.mesa?.numero) || null,
       cobrador_nombre: cobradorNombre,
@@ -818,6 +838,8 @@ router.post('/caja/cobrar/:id', async (req, res) => {
         total: venta.total,
         tipo_pago: venta.tipo_pago,
         tipo_pedido: venta.tipo_pedido,
+        monto_recibido: venta.monto_recibido,
+        vuelto: venta.vuelto,
         fecha: venta.fecha
       }
     });
@@ -835,9 +857,27 @@ router.post('/comandas/:id/cobrar-mesa', async (req, res) => {
     const tipoPago = sanitizeText(req.body?.tipo_pago, { max: 30 });
     const tipoPedidoInput = sanitizeOptionalText(req.body?.tipo_pedido, { max: 40 }) || '';
     const cobradorNombre = sanitizeOptionalText(req.body?.cobrador_nombre, { max: 120 }) || '';
+    const montoRecibidoInput = req.body?.monto_recibido;
+    const vueltoInput = req.body?.vuelto;
 
     if (!tipoPago) {
       return res.status(400).json({ error: 'Tipo de pago requerido' });
+    }
+
+    const montoRecibido =
+      montoRecibidoInput === null || montoRecibidoInput === undefined || montoRecibidoInput === ''
+        ? null
+        : Number(montoRecibidoInput);
+    if (montoRecibido !== null && (Number.isNaN(montoRecibido) || montoRecibido < 0)) {
+      return res.status(400).json({ error: 'Monto recibido invalido' });
+    }
+
+    const vuelto =
+      vueltoInput === null || vueltoInput === undefined || vueltoInput === ''
+        ? null
+        : Number(vueltoInput);
+    if (vuelto !== null && Number.isNaN(vuelto)) {
+      return res.status(400).json({ error: 'Vuelto invalido' });
     }
 
     const cajaAbierta = await Caja.findOne({ cierre: null, local: req.localId });
@@ -885,6 +925,8 @@ router.post('/comandas/:id/cobrar-mesa', async (req, res) => {
       total,
       tipo_pago: tipoPago,
       tipo_pedido: tipoPedido,
+      monto_recibido: montoRecibido,
+      vuelto,
       origen_cobro: 'mesa_restaurante',
       mesa_numero: Number(comanda.mesa?.numero) || null,
       cobrador_nombre: cobradorNombre,
@@ -919,6 +961,8 @@ router.post('/comandas/:id/cobrar-mesa', async (req, res) => {
         total: venta.total,
         tipo_pago: venta.tipo_pago,
         tipo_pedido: venta.tipo_pedido,
+        monto_recibido: venta.monto_recibido,
+        vuelto: venta.vuelto,
         origen_cobro: venta.origen_cobro,
         cobrador_nombre: venta.cobrador_nombre,
         fecha: venta.fecha
