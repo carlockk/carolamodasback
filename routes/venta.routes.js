@@ -36,8 +36,47 @@ const normalizarAgregadosVenta = (raw) => {
     .filter(Boolean);
 };
 
-const calcularStockDesdeVariantes = (variantes = []) =>
-  variantes.reduce((acc, variante) => acc + (variante.stock || 0), 0);
+const normalizarPagosVenta = (raw) => {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((pago) => {
+      const tipo = sanitizeText(pago?.tipo, { max: 30 });
+      const monto = Number(pago?.monto);
+      if (!tipo || !Number.isFinite(monto) || monto <= 0) return null;
+      return {
+        tipo,
+        monto: Math.round(monto)
+      };
+    })
+    .filter(Boolean);
+};
+
+const obtenerPagosAplicados = (venta) => {
+  if (Array.isArray(venta.pagos) && venta.pagos.length > 0) {
+    return venta.pagos
+      .map((pago) => ({
+        tipo: pago?.tipo || 'Otro',
+        monto: Number(pago?.monto) || 0
+      }))
+      .filter((pago) => pago.monto > 0);
+  }
+
+  return [{
+    tipo: venta.tipo_pago || 'Otro',
+    monto: Number(venta.total) || 0
+  }];
+};
+
+const calcularStockDesdeVariantes = (variantes = []) => {
+  const stocks = variantes
+    .map((variante) => {
+      if (variante?.stock === null || variante?.stock === undefined || variante?.stock === '') return null;
+      return Number(variante.stock);
+    })
+    .filter((stock) => Number.isFinite(stock) && stock >= 0);
+  if (stocks.length === 0) return null;
+  return stocks.reduce((acc, stock) => acc + stock, 0);
+};
 
 const consolidarVentas = (ventasPos = [], ventasWeb = []) => ([
   ...ventasPos.map((venta) => ({ ...venta.toObject(), canal: 'POS' })),
@@ -117,13 +156,14 @@ const armarDesglosePorTipoPago = (ventas = []) => {
   const porTipoPagoDetallado = { POS: {}, WEB: {} };
 
   ventas.forEach((venta) => {
-    const tipoPago = venta.tipo_pago || 'Otro';
-    const total = Number(venta.total) || 0;
     const canal = venta.canal === 'WEB' ? 'WEB' : 'POS';
-    const llaveConCanal = `${tipoPago} (${canal})`;
 
-    porTipoPago[llaveConCanal] = (porTipoPago[llaveConCanal] || 0) + total;
-    porTipoPagoDetallado[canal][tipoPago] = (porTipoPagoDetallado[canal][tipoPago] || 0) + total;
+    obtenerPagosAplicados(venta).forEach((pago) => {
+      const llaveConCanal = `${pago.tipo} (${canal})`;
+      porTipoPago[llaveConCanal] = (porTipoPago[llaveConCanal] || 0) + pago.monto;
+      porTipoPagoDetallado[canal][pago.tipo] =
+        (porTipoPagoDetallado[canal][pago.tipo] || 0) + pago.monto;
+    });
   });
 
   return { porTipoPago, porTipoPagoDetallado };
@@ -396,7 +436,7 @@ router.post('/', async (req, res) => {
   try {
     session.startTransaction();
 
-    const { productos, total, tipo_pago, tipo_pedido, monto_recibido, vuelto } = req.body;
+    const { productos, total, tipo_pago, tipo_pedido, monto_recibido, vuelto, pagos } = req.body;
     const tipoPago = sanitizeText(tipo_pago, { max: 30 });
     const tipoPedido = sanitizeOptionalText(tipo_pedido, { max: 40 }) || '';
 
@@ -417,6 +457,22 @@ router.post('/', async (req, res) => {
       const error = new Error('El total de la venta es inválido.');
       error.status = 400;
       throw error;
+    }
+
+    const pagosNormalizados = normalizarPagosVenta(pagos);
+    if (pagos !== undefined && pagosNormalizados.length === 0) {
+      const error = new Error('Debes ingresar al menos un pago válido.');
+      error.status = 400;
+      throw error;
+    }
+
+    if (pagosNormalizados.length > 0) {
+      const totalPagos = pagosNormalizados.reduce((sum, pago) => sum + pago.monto, 0);
+      if (Math.abs(totalPagos - totalNumerico) > 1) {
+        const error = new Error('La suma de pagos debe coincidir con el total de la venta.');
+        error.status = 400;
+        throw error;
+      }
     }
 
     const montoRecibidoNumerico =
@@ -498,16 +554,21 @@ router.post('/', async (req, res) => {
           throw error;
         }
 
-        if (varianteSeleccionada.stock < cantidadSolicitada) {
-          const error = new Error(
-            `Stock insuficiente para ${nombreProducto} (${varianteSeleccionada.nombre}). Disponible: ${varianteSeleccionada.stock}`
-          );
-          error.status = 400;
-          throw error;
-        }
+        const controlaStockVariante =
+          typeof varianteSeleccionada.stock === 'number' &&
+          !Number.isNaN(varianteSeleccionada.stock);
+        if (controlaStockVariante) {
+          if (varianteSeleccionada.stock < cantidadSolicitada) {
+            const error = new Error(
+              `Stock insuficiente para ${nombreProducto} (${varianteSeleccionada.nombre}). Disponible: ${varianteSeleccionada.stock}`
+            );
+            error.status = 400;
+            throw error;
+          }
 
-        varianteSeleccionada.stock -= cantidadSolicitada;
-        producto.stock = calcularStockDesdeVariantes(producto.variantes);
+          varianteSeleccionada.stock -= cantidadSolicitada;
+          producto.stock = calcularStockDesdeVariantes(producto.variantes);
+        }
       } else {
         const controlaStock = typeof producto.stock === 'number' && !Number.isNaN(producto.stock);
         if (controlaStock) {
@@ -548,6 +609,7 @@ router.post('/', async (req, res) => {
       productos: productosRegistrados,
       total: totalNumerico,
       tipo_pago: tipoPago,
+      pagos: pagosNormalizados.length > 0 ? pagosNormalizados : [{ tipo: tipoPago, monto: Math.round(totalNumerico) }],
       tipo_pedido: tipoPedido,
       monto_recibido: montoRecibidoNumerico,
       vuelto: vueltoNumerico,

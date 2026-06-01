@@ -279,7 +279,7 @@ const normalizarVariantes = (raw) => {
       if (stockRaw !== null && (Number.isNaN(stockRaw) || stockRaw < 0)) {
         throw new Error(`El stock de la variante "${nombre}" es inválido`);
       }
-      const stock = stockRaw !== null && stockRaw > 0 ? stockRaw : null;
+      const stock = stockRaw !== null ? stockRaw : null;
       const agotado = variant.agotado === true || String(variant.agotado) === 'true';
 
       return {
@@ -322,8 +322,11 @@ const parseObjectIdArray = (raw) => {
 const calcularStockTotal = (variantes, stockBase) => {
   if (Array.isArray(variantes) && variantes.length > 0) {
     const stocks = variantes
-      .map((vari) => Number(vari?.stock))
-      .filter((n) => Number.isFinite(n) && n > 0);
+      .map((vari) => {
+        if (vari?.stock === null || vari?.stock === undefined || vari?.stock === '') return null;
+        return Number(vari.stock);
+      })
+      .filter((n) => Number.isFinite(n) && n >= 0);
     if (stocks.length === 0) return null;
     return stocks.reduce((acc, val) => acc + val, 0);
   }

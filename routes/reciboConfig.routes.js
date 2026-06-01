@@ -49,6 +49,9 @@ router.put('/', upload.single('logo'), async (req, res) => {
     const nombre = sanitizeOptionalText(req.body.nombre, { max: 120 });
     const pie = sanitizeOptionalText(req.body.pie, { max: 300 });
     const copias = clampCopias(req.body.copias_auto);
+    const imprimirAuto = req.body.imprimir_auto === undefined
+      ? config.imprimir_auto !== false
+      : String(req.body.imprimir_auto) === 'true';
     const removeLogo = String(req.body.remove_logo) === 'true';
 
     if (nombre !== null && nombre !== undefined) {
@@ -59,6 +62,7 @@ router.put('/', upload.single('logo'), async (req, res) => {
     if (pie !== null && pie !== undefined) {
       config.pie = pie || '';
     }
+    config.imprimir_auto = imprimirAuto;
     config.copias_auto = copias;
 
     if (removeLogo && config.logo_cloudinary_id) {

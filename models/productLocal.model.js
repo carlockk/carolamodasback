@@ -48,8 +48,9 @@ productLocalSchema.virtual('stock_total').get(function () {
   if (Array.isArray(this.variantes) && this.variantes.length > 0) {
     const stocks = this.variantes
       .map((vari) => {
+        if (vari.stock === null || vari.stock === undefined || vari.stock === '') return null;
         const valor = Number(vari.stock);
-        return Number.isFinite(valor) && valor > 0 ? valor : null;
+        return Number.isFinite(valor) && valor >= 0 ? valor : null;
       })
       .filter((st) => st !== null);
 

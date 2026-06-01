@@ -28,6 +28,12 @@ const ventaSchema = new mongoose.Schema({
   ],
   total: Number,
   tipo_pago: String,
+  pagos: [
+    {
+      tipo: String,
+      monto: Number
+    }
+  ],
   tipo_pedido: String,
   monto_recibido: { type: Number, default: null },
   vuelto: { type: Number, default: null },

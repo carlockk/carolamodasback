@@ -98,8 +98,16 @@ router.post('/cerrar', async (req, res) => {
 
     const desglose = {};
     ventas.forEach(v => {
-      const metodo = v.tipo_pago || 'Otro';
-      desglose[metodo] = (desglose[metodo] || 0) + v.total;
+      const pagos = Array.isArray(v.pagos) && v.pagos.length > 0
+        ? v.pagos
+        : [{ tipo: v.tipo_pago || 'Otro', monto: v.total }];
+
+      pagos.forEach((pago) => {
+        const metodo = pago.tipo || 'Otro';
+        const monto = Number(pago.monto) || 0;
+        if (monto <= 0) return;
+        desglose[metodo] = (desglose[metodo] || 0) + monto;
+      });
     });
 
     caja.cierre = new Date();

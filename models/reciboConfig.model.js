@@ -7,6 +7,7 @@ const reciboConfigSchema = new mongoose.Schema(
     logo_url: { type: String, default: '' },
     logo_cloudinary_id: { type: String, default: '' },
     pie: { type: String, default: '' },
+    imprimir_auto: { type: Boolean, default: true },
     copias_auto: { type: Number, default: 1 },
     actualizado_en: { type: Date, default: Date.now }
   }
