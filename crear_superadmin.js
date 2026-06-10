@@ -6,11 +6,13 @@ const Usuario = require('./models/usuario.model.js');
 dotenv.config();
 
 const run = async () => {
-  await mongoose.connect(process.env.MONGO_URI);
+  await mongoose.connect(process.env.MONGO_URI, {
+    dbName: process.env.MONGO_DB_NAME || 'posaildb'
+  });
 
-  const email = 'carlos.virtualdesk@gmail.com';
+  const email = 'carolaa.modass@gmail.com';
   const password = '96669823aBC';
-  const nombre = 'carlockk';
+  const nombre = 'Carola';
   const rol = 'superadmin';
 
   const hashedPassword = await bcrypt.hash(password, 10);
