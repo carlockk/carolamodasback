@@ -4,6 +4,7 @@ const Venta = require('../models/venta.model.js');
 const VentaCliente = require('../models/ventaCliente.model.js');
 const ProductoLocal = require('../models/productLocal.model.js');
 const Caja = require('../models/caja.model.js');
+const Devolucion = require('../models/devolucion.model.js');
 const { sanitizeText, sanitizeOptionalText } = require('../utils/input');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 const { requiereRol } = require('../middlewares/roles');
@@ -209,10 +210,77 @@ router.get('/', async (req, res) => {
     const ventas = await Venta.find(filtro)
       .populate('usuario', 'nombre email rol')
       .sort({ fecha: -1 });
-    res.json(ventas);
+    const devoluciones = await Devolucion.find({
+      venta: { $in: ventas.map((venta) => venta._id) },
+      local: req.localId
+    }).populate('usuario', 'nombre email').sort({ fecha: -1 });
+    const porVenta = devoluciones.reduce((acc, devolucion) => {
+      const ventaId = String(devolucion.venta);
+      acc[ventaId] = acc[ventaId] || [];
+      acc[ventaId].push(devolucion);
+      return acc;
+    }, {});
+    res.json(ventas.map((venta) => ({
+      ...venta.toObject(),
+      devoluciones: porVenta[String(venta._id)] || []
+    })));
   } catch (err) {
     console.error('Error al obtener historial:', err);
     res.status(500).json({ error: 'Error interno al obtener historial' });
+  }
+});
+
+router.post('/:id/devoluciones', async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Venta invalida' });
+    }
+
+    const monto = Math.round(Number(req.body?.monto));
+    const motivo = sanitizeText(req.body?.motivo, { max: 300 });
+    const tipoPago = sanitizeText(req.body?.tipo_pago, { max: 30 });
+    if (!Number.isFinite(monto) || monto <= 0) {
+      return res.status(400).json({ error: 'Monto de devolucion invalido' });
+    }
+    if (!motivo) return res.status(400).json({ error: 'El motivo es obligatorio' });
+    if (!tipoPago) return res.status(400).json({ error: 'El medio de devolucion es obligatorio' });
+
+    const [venta, caja] = await Promise.all([
+      Venta.findOne({ _id: req.params.id, local: req.localId }),
+      Caja.findOne({ cierre: null, local: req.localId })
+    ]);
+    if (!venta) return res.status(404).json({ error: 'Venta no encontrada' });
+    if (!caja) return res.status(400).json({ error: 'Debes tener una caja abierta para devolver dinero' });
+
+    const acumulado = await Devolucion.aggregate([
+      { $match: { venta: venta._id, local: new mongoose.Types.ObjectId(req.localId) } },
+      { $group: { _id: null, total: { $sum: '$monto' } } }
+    ]);
+    const yaDevuelto = Number(acumulado[0]?.total) || 0;
+    const disponible = Math.max(0, (Number(venta.total) || 0) - yaDevuelto);
+    if (monto > disponible) {
+      return res.status(400).json({ error: `El monto supera el saldo disponible de $${disponible.toLocaleString('es-CL')}` });
+    }
+
+    const devolucion = await Devolucion.create({
+      venta: venta._id,
+      caja: caja._id,
+      local: req.localId,
+      usuario: req.userId || null,
+      monto,
+      motivo,
+      tipo_pago: tipoPago
+    });
+
+    res.status(201).json({
+      mensaje: 'Devolucion registrada',
+      devolucion,
+      total_devuelto: yaDevuelto + monto,
+      saldo_disponible: disponible - monto
+    });
+  } catch (err) {
+    console.error('Error al registrar devolucion:', err);
+    res.status(500).json({ error: 'No se pudo registrar la devolucion' });
   }
 });
 
