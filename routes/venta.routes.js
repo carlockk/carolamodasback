@@ -6,10 +6,12 @@ const ProductoLocal = require('../models/productLocal.model.js');
 const Caja = require('../models/caja.model.js');
 const { sanitizeText, sanitizeOptionalText } = require('../utils/input');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
+const { requiereRol } = require('../middlewares/roles');
 
 const router = express.Router();
 router.use(adjuntarScopeLocal);
 router.use(requiereLocal);
+router.use(requiereRol('superadmin', 'admin', 'cajero'));
 
 const obtenerAtributosVariante = (variante) => {
   if (!variante) return [];

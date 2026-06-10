@@ -3,10 +3,12 @@ const Caja = require('../models/caja.model.js');
 const Venta = require('../models/venta.model.js');
 const { sanitizeOptionalText } = require('../utils/input');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
+const { requiereRol } = require('../middlewares/roles');
 
 const router = express.Router();
 router.use(adjuntarScopeLocal);
 router.use(requiereLocal);
+router.use(requiereRol('superadmin', 'admin', 'cajero'));
 
 /**
  * @swagger

@@ -34,6 +34,9 @@ const esGetCatalogoPublico = (req) => {
   return false;
 };
 
+const puedeUsarHeaderLocalSinLocalEnToken = (role) =>
+  ['public', 'cliente'].includes(normalizarRol(role));
+
 const adjuntarScopeLocal = (req, res, next) => {
   const payload = req.auth || getAuthPayloadFromRequest(req);
   const allowLegacyHeaders = process.env.ALLOW_LEGACY_SCOPE_HEADERS === 'true';
@@ -90,7 +93,8 @@ const adjuntarScopeLocal = (req, res, next) => {
       }
     } else {
       // Para tokens sin local embebido (ej. cliente web), se permite elegir local por header.
-      const puedeElegirLocalPorHeader = !localFromToken;
+      const puedeElegirLocalPorHeader =
+        !localFromToken && puedeUsarHeaderLocalSinLocalEnToken(roleFromToken);
       if (
         headerLocalRaw !== undefined &&
         headerLocalRaw !== null &&
@@ -99,6 +103,9 @@ const adjuntarScopeLocal = (req, res, next) => {
         String(headerLocalRaw) !== localFromToken
       ) {
         return res.status(403).json({ error: 'No puedes operar sobre otro local' });
+      }
+      if (!localFromToken && headerLocalRaw !== undefined && String(headerLocalRaw).trim() !== '' && !puedeElegirLocalPorHeader) {
+        return res.status(403).json({ error: 'No puedes operar sobre un local por header' });
       }
       if (puedeElegirLocalPorHeader && headerLocalRaw !== undefined && String(headerLocalRaw).trim() !== '') {
         if (!mongoose.Types.ObjectId.isValid(headerLocalRaw)) {
