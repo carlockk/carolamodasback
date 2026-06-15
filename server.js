@@ -101,6 +101,7 @@ const reciboConfigRoutes = require("./routes/reciboConfig.routes");
 const agregadoRoutes = require("./routes/agregado.routes");
 const socialConfigRoutes = require("./routes/socialConfig.routes");
 const restauranteRoutes = require("./routes/restaurante.routes");
+const descuentoRoutes = require("./routes/descuento.routes");
 
 // Swagger
 const { swaggerUi, specs } = require("./swagger");
@@ -124,6 +125,7 @@ app.use("/api/recibo-config", reciboConfigRoutes);
 app.use("/api/agregados", agregadoRoutes);
 app.use("/api/social-config", socialConfigRoutes);
 app.use("/api/restaurante", restauranteRoutes);
+app.use("/api/descuentos", descuentoRoutes);
 
 // 🔌 Levantar servidor primero para evitar timeout en Render
 app.listen(PORT, "0.0.0.0", () => {

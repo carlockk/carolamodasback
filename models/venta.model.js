@@ -7,6 +7,14 @@ const ventaSchema = new mongoose.Schema({
       productoId: mongoose.Schema.Types.ObjectId,
       nombre: String,
       precio_unitario: Number,
+      precio_original: Number,
+      descuento: {
+        descuentoId: mongoose.Schema.Types.ObjectId,
+        nombre: String,
+        tipo: String,
+        valor: Number,
+        monto: Number
+      },
       cantidad: Number,
       observacion: String,
       varianteId: mongoose.Schema.Types.ObjectId,
@@ -27,6 +35,15 @@ const ventaSchema = new mongoose.Schema({
     }
   ],
   total: Number,
+  subtotal: Number,
+  descuento_total: { type: Number, default: 0 },
+  descuento_venta: {
+    descuentoId: mongoose.Schema.Types.ObjectId,
+    nombre: String,
+    tipo: String,
+    valor: Number,
+    monto: Number
+  },
   tipo_pago: String,
   pagos: [
     {

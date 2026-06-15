@@ -103,13 +103,20 @@ router.post('/', async (req, res) => {
       nombre: sanitizeOptionalText(item?.nombre, { max: 120 }) || '',
       observacion: sanitizeOptionalText(item?.observacion, { max: 120 }) || '',
       varianteNombre: sanitizeOptionalText(item?.varianteNombre, { max: 80 }) || '',
-      agregados: normalizarAgregadosTicket(item?.agregados)
+      agregados: normalizarAgregadosTicket(item?.agregados),
+      precio_original: Number(item?.precio_original ?? item?.precio_unitario) || 0,
+      descuento: item?.descuento && typeof item.descuento === 'object' ? item.descuento : null
     }));
 
     const nuevo = new Ticket({
       nombre,
       productos: productosLimpios,
       total,
+      subtotal: Number(req.body?.subtotal) || total,
+      descuento_total: Number(req.body?.descuento_total) || 0,
+      descuento_venta: req.body?.descuento_venta && typeof req.body.descuento_venta === 'object'
+        ? req.body.descuento_venta
+        : null,
       local: req.localId,
       usuario: req.userId || null
     });

@@ -5,6 +5,7 @@ const VentaCliente = require('../models/ventaCliente.model.js');
 const ProductoLocal = require('../models/productLocal.model.js');
 const Caja = require('../models/caja.model.js');
 const Devolucion = require('../models/devolucion.model.js');
+const Descuento = require('../models/descuento.model.js');
 const { sanitizeText, sanitizeOptionalText } = require('../utils/input');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 const { requiereRol } = require('../middlewares/roles');
@@ -53,6 +54,24 @@ const normalizarPagosVenta = (raw) => {
     })
     .filter(Boolean);
 };
+
+const calcularDescuento = (montoBase, descuento) => {
+  const base = Math.max(0, Math.round(Number(montoBase) || 0));
+  if (!descuento || base <= 0) return 0;
+  const valor = Number(descuento.valor) || 0;
+  const calculado = descuento.tipo === 'porcentaje'
+    ? Math.round(base * Math.min(Math.max(valor, 0), 100) / 100)
+    : Math.round(Math.max(valor, 0));
+  return Math.min(base, calculado);
+};
+
+const snapshotDescuento = (descuento, monto) => descuento ? ({
+  descuentoId: descuento._id,
+  nombre: descuento.nombre,
+  tipo: descuento.tipo,
+  valor: descuento.valor,
+  monto
+}) : null;
 
 const obtenerPagosAplicados = (venta) => {
   if (Array.isArray(venta.pagos) && venta.pagos.length > 0) {
@@ -506,7 +525,7 @@ router.post('/', async (req, res) => {
   try {
     session.startTransaction();
 
-    const { productos, total, tipo_pago, tipo_pedido, monto_recibido, vuelto, pagos } = req.body;
+    const { productos, total, tipo_pago, tipo_pedido, monto_recibido, vuelto, pagos, descuento_venta } = req.body;
     const tipoPago = sanitizeText(tipo_pago, { max: 30 });
     const tipoPedido = sanitizeOptionalText(tipo_pedido, { max: 40 }) || '';
 
@@ -530,7 +549,7 @@ router.post('/', async (req, res) => {
     }
 
     const pagosNormalizados = normalizarPagosVenta(pagos);
-    if (pagos !== undefined && pagosNormalizados.length === 0) {
+    if (totalNumerico > 0 && pagos !== undefined && pagosNormalizados.length === 0) {
       const error = new Error('Debes ingresar al menos un pago válido.');
       error.status = 400;
       throw error;
@@ -576,6 +595,18 @@ router.post('/', async (req, res) => {
     }
 
     const productosRegistrados = [];
+    let subtotalBruto = 0;
+    let subtotalConDescuentosItem = 0;
+
+    const descuentoVentaId = descuento_venta?.descuentoId || descuento_venta?._id || null;
+    const descuentoVenta = descuentoVentaId && mongoose.Types.ObjectId.isValid(descuentoVentaId)
+      ? await Descuento.findOne({ _id: descuentoVentaId, local: req.localId, activo: true }).session(session)
+      : null;
+    if (descuentoVentaId && !descuentoVenta) {
+      const error = new Error('El descuento general seleccionado no esta disponible.');
+      error.status = 400;
+      throw error;
+    }
 
     for (const item of productos) {
       if (!item?.productoId) {
@@ -654,7 +685,7 @@ router.post('/', async (req, res) => {
 
       await producto.save({ session });
 
-      const precioUnitario =
+      const precioOriginal =
         Number(
           item.precio_unitario ??
             (varianteSeleccionada && varianteSeleccionada.precio !== undefined
@@ -662,10 +693,26 @@ router.post('/', async (req, res) => {
               : producto.precio)
         ) || 0;
 
+      const descuentoItemId = item?.descuento?.descuentoId || item?.descuento?._id || null;
+      const descuentoItem = descuentoItemId && mongoose.Types.ObjectId.isValid(descuentoItemId)
+        ? await Descuento.findOne({ _id: descuentoItemId, local: req.localId, activo: true }).session(session)
+        : null;
+      if (descuentoItemId && !descuentoItem) {
+        const error = new Error(`El descuento de ${nombreProducto} no esta disponible.`);
+        error.status = 400;
+        throw error;
+      }
+      const montoDescuentoUnitario = calcularDescuento(precioOriginal, descuentoItem);
+      const precioUnitario = Math.max(0, precioOriginal - montoDescuentoUnitario);
+      subtotalBruto += precioOriginal * cantidadSolicitada;
+      subtotalConDescuentosItem += precioUnitario * cantidadSolicitada;
+
       productosRegistrados.push({
         productoId: producto._id,
         nombre: nombreProducto || 'Producto sin nombre',
         precio_unitario: precioUnitario,
+        precio_original: precioOriginal,
+        descuento: snapshotDescuento(descuentoItem, montoDescuentoUnitario),
         cantidad: cantidadSolicitada,
         observacion: sanitizeOptionalText(item.observacion, { max: 120 }) || '',
         varianteId: varianteSeleccionada?._id || null,
@@ -675,11 +722,24 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const montoDescuentoVenta = calcularDescuento(subtotalConDescuentosItem, descuentoVenta);
+    const totalCalculado = Math.max(0, subtotalConDescuentosItem - montoDescuentoVenta);
+    const descuentoItemsTotal = subtotalBruto - subtotalConDescuentosItem;
+    const descuentoTotal = descuentoItemsTotal + montoDescuentoVenta;
+    if (Math.abs(totalCalculado - totalNumerico) > 1) {
+      const error = new Error('El total no coincide con los descuentos aplicados. Actualiza el carrito e intenta nuevamente.');
+      error.status = 400;
+      throw error;
+    }
+
     const venta = new Venta({
       productos: productosRegistrados,
-      total: totalNumerico,
+      subtotal: subtotalBruto,
+      descuento_total: descuentoTotal,
+      descuento_venta: snapshotDescuento(descuentoVenta, montoDescuentoVenta),
+      total: totalCalculado,
       tipo_pago: tipoPago,
-      pagos: pagosNormalizados.length > 0 ? pagosNormalizados : [{ tipo: tipoPago, monto: Math.round(totalNumerico) }],
+      pagos: pagosNormalizados.length > 0 ? pagosNormalizados : [{ tipo: tipoPago, monto: Math.round(totalCalculado) }],
       tipo_pedido: tipoPedido,
       monto_recibido: montoRecibidoNumerico,
       vuelto: vueltoNumerico,
@@ -692,7 +752,7 @@ router.post('/', async (req, res) => {
     await venta.save({ session });
     await session.commitTransaction();
 
-    res.json({ mensaje: 'Venta registrada', numero_pedido: venta.numero_pedido });
+    res.json({ mensaje: 'Venta registrada', numero_pedido: venta.numero_pedido, venta });
   } catch (err) {
     await session.abortTransaction().catch(() => {});
     console.error('Error al registrar venta:', err);

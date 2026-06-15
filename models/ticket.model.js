@@ -7,6 +7,8 @@ const ticketSchema = new mongoose.Schema({
       productoId: mongoose.Schema.Types.ObjectId,
       nombre: String,
       precio_unitario: Number,
+      precio_original: Number,
+      descuento: { type: Object, default: null },
       cantidad: Number,
       observacion: String,
       varianteId: mongoose.Schema.Types.ObjectId,
@@ -27,6 +29,9 @@ const ticketSchema = new mongoose.Schema({
     }
   ],
   total: Number,
+  subtotal: Number,
+  descuento_total: { type: Number, default: 0 },
+  descuento_venta: { type: Object, default: null },
   usuario: { type: mongoose.Schema.Types.ObjectId, ref: 'Usuario', default: null },
   local: { type: mongoose.Schema.Types.ObjectId, ref: 'Local', default: null },
   creado: {
