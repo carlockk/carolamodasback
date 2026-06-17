@@ -14,6 +14,10 @@ const insumoSchema = new mongoose.Schema(
   {
     nombre: { type: String, required: true, trim: true },
     descripcion: { type: String, trim: true },
+    sku: { type: String, trim: true },
+    color: { type: String, trim: true },
+    talla: { type: String, trim: true },
+    imagen_url: { type: String, trim: true },
     unidad: { type: String, required: true, trim: true },
     stock_total: { type: Number, default: 0 },
     stock_minimo: { type: Number, default: 0 },

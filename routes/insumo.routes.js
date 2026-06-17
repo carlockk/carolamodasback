@@ -1,16 +1,19 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const multer = require('multer');
 const Insumo = require('../models/insumo.model');
 const InsumoLote = require('../models/insumoLote.model');
 const InsumoMovimiento = require('../models/insumoMovimiento.model');
 const InsumoAlertaConfig = require('../models/insumoAlertaConfig.model');
 const Usuario = require('../models/usuario.model.js');
 const Local = require('../models/local.model');
+const { subirImagen } = require('../utils/cloudinary');
 const { sanitizeText, sanitizeOptionalText, toNumberOrNull } = require('../utils/input');
 const { sendMail } = require('../utils/mailer');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage() });
 router.use(adjuntarScopeLocal);
 router.use(requiereLocal);
 
@@ -23,6 +26,15 @@ const parsePositiveNumber = (value, field) => {
 };
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const isValidHttpUrl = (value) => {
+  try {
+    const parsed = new URL(String(value));
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
 
 const rolesObservaciones = new Set(['admin', 'superadmin', 'cajero']);
 
@@ -46,24 +58,6 @@ const obtenerDestinatarios = async (localId) => {
   return usuarios
     .map((u) => ({ email: u.email, nombre: u.nombre }))
     .filter((u) => Boolean(u.email));
-};
-
-const evaluarVencimientos = (lotes, alertaDias) => {
-  const hoy = new Date();
-  const porVencer = [];
-  const vencidos = [];
-  lotes.forEach((lote) => {
-    if (!lote.fecha_vencimiento) return;
-    const venc = new Date(lote.fecha_vencimiento);
-    if (Number.isNaN(venc.getTime())) return;
-    const diff = Math.ceil((venc - hoy) / (1000 * 60 * 60 * 24));
-    if (diff < 0) {
-      vencidos.push(lote);
-    } else if (diff <= alertaDias) {
-      porVencer.push(lote);
-    }
-  });
-  return { porVencer, vencidos };
 };
 
 router.get('/', async (req, res) => {
@@ -318,58 +312,23 @@ router.post('/alertas/resumen', async (req, res) => {
     const insumosBajos = insumos.filter(
       (insumo) => Number(insumo.stock_total || 0) <= Number(insumo.stock_minimo || 0)
     );
-    const lotes = await InsumoLote.find({
-      local: req.localId,
-      activo: true,
-      cantidad: { $gt: 0 },
-      fecha_vencimiento: { $ne: null }
-    });
-
-    const lotesPorInsumo = new Map();
-    lotes.forEach((lote) => {
-      const key = String(lote.insumo);
-      if (!lotesPorInsumo.has(key)) {
-        lotesPorInsumo.set(key, []);
-      }
-      lotesPorInsumo.get(key).push(lote);
-    });
-
-    const vencimientos = [];
-    insumos.forEach((insumo) => {
-      const { porVencer, vencidos } = evaluarVencimientos(
-        lotesPorInsumo.get(String(insumo._id)) || [],
-        Number(insumo.alerta_vencimiento_dias || 7)
-      );
-      if (porVencer.length || vencidos.length) {
-        vencimientos.push({ insumo, porVencer, vencidos });
-      }
-    });
-
-    if (insumosBajos.length === 0 && vencimientos.length === 0) {
+    if (insumosBajos.length === 0) {
       return res.json({ mensaje: 'No hay alertas para enviar' });
     }
 
-    const subject = 'Resumen diario de insumos';
+    const subject = 'Resumen diario de stock bodega';
     const html = `
-      <h3>Resumen diario de insumos</h3>
+      <h3>Resumen diario de stock bodega</h3>
       ${insumosBajos.length ? `<h4>Stock bajo</h4><ul>${insumosBajos
         .map((insumo) => `<li>${insumo.nombre}: ${insumo.stock_total} (min ${insumo.stock_minimo})</li>`)
-        .join('')}</ul>` : '<p>Sin insumos con stock bajo.</p>'}
-      ${vencimientos.length ? `<h4>Vencimientos</h4><ul>${vencimientos
-        .map((item) => {
-          const partes = [];
-          if (item.vencidos.length) partes.push(`Vencidos: ${item.vencidos.length}`);
-          if (item.porVencer.length) partes.push(`Por vencer: ${item.porVencer.length}`);
-          return `<li>${item.insumo.nombre}: ${partes.join(' - ')}</li>`;
-        })
-        .join('')}</ul>` : '<p>Sin lotes por vencer.</p>'}
+        .join('')}</ul>` : '<p>Sin productos de bodega con stock bajo.</p>'}
     `;
 
     await sendMail({
       to: destinatarios.map((d) => d.email).join(','),
       subject,
       html,
-      text: 'Resumen diario de insumos'
+      text: 'Resumen diario de stock bodega'
     });
 
     res.json({ mensaje: 'Resumen enviado' });
@@ -443,6 +402,10 @@ router.post('/clonar', async (req, res) => {
       nuevos.push({
         nombre: insumo.nombre,
         descripcion: insumo.descripcion || '',
+        sku: insumo.sku || '',
+        color: insumo.color || '',
+        talla: insumo.talla || '',
+        imagen_url: insumo.imagen_url || '',
         unidad: insumo.unidad,
         stock_total: 0,
         stock_minimo: insumo.stock_minimo || 0,
@@ -469,11 +432,15 @@ router.post('/clonar', async (req, res) => {
   }
 });
 
-router.post('/', async (req, res) => {
+router.post('/', upload.single('imagen'), async (req, res) => {
   try {
     const nombre = sanitizeText(req.body.nombre, { max: 120 });
     const descripcion = sanitizeOptionalText(req.body.descripcion, { max: 300 }) || '';
-    const unidad = sanitizeText(req.body.unidad, { max: 20 });
+    const sku = sanitizeOptionalText(req.body.sku, { max: 60 }) || '';
+    const color = sanitizeOptionalText(req.body.color, { max: 60 }) || '';
+    const talla = sanitizeOptionalText(req.body.talla, { max: 60 }) || '';
+    const unidad = sanitizeText(req.body.unidad || 'unid', { max: 20 });
+    const imagenUrlBody = sanitizeOptionalText(req.body.imagen_url, { max: 600 }) || '';
     let categoriaRaw = req.body.categoria;
     if (categoriaRaw && typeof categoriaRaw === 'object' && categoriaRaw._id) {
       categoriaRaw = categoriaRaw._id;
@@ -484,6 +451,17 @@ router.post('/', async (req, res) => {
 
     if (!nombre || !unidad) {
       return res.status(400).json({ error: 'Nombre y unidad son requeridos' });
+    }
+
+    let imagen_url = '';
+    if (req.file) {
+      const subida = await subirImagen(req.file);
+      imagen_url = subida.secure_url;
+    } else if (imagenUrlBody) {
+      if (!isValidHttpUrl(imagenUrlBody)) {
+        return res.status(400).json({ error: 'La URL de imagen es invalida' });
+      }
+      imagen_url = imagenUrlBody;
     }
 
     const existe = await Insumo.findOne({
@@ -505,6 +483,10 @@ router.post('/', async (req, res) => {
     const nuevo = new Insumo({
       nombre,
       descripcion,
+      sku,
+      color,
+      talla,
+      imagen_url,
       unidad,
       stock_minimo: stockMinimo ?? 0,
       alerta_vencimiento_dias: alertaVenc ?? 7,
@@ -518,12 +500,16 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:id', async (req, res) => {
+router.put('/:id', upload.single('imagen'), async (req, res) => {
   try {
     console.log('PUT /insumos/:id body', req.body);
     const nombre = sanitizeText(req.body.nombre, { max: 120 });
     const descripcion = sanitizeOptionalText(req.body.descripcion, { max: 300 }) || '';
-    const unidad = sanitizeText(req.body.unidad, { max: 20 });
+    const sku = sanitizeOptionalText(req.body.sku, { max: 60 }) || '';
+    const color = sanitizeOptionalText(req.body.color, { max: 60 }) || '';
+    const talla = sanitizeOptionalText(req.body.talla, { max: 60 }) || '';
+    const unidad = sanitizeText(req.body.unidad || 'unid', { max: 20 });
+    const imagenUrlBody = sanitizeOptionalText(req.body.imagen_url, { max: 600 }) || '';
     let categoriaRaw = req.body.categoria;
     if (categoriaRaw && typeof categoriaRaw === 'object' && categoriaRaw._id) {
       categoriaRaw = categoriaRaw._id;
@@ -549,6 +535,18 @@ router.put('/:id', async (req, res) => {
     if (nombre) insumo.nombre = nombre;
     if (unidad) insumo.unidad = unidad;
     insumo.descripcion = descripcion;
+    insumo.sku = sku;
+    insumo.color = color;
+    insumo.talla = talla;
+    if (req.file) {
+      const subida = await subirImagen(req.file);
+      insumo.imagen_url = subida.secure_url;
+    } else if (req.body.imagen_url !== undefined) {
+      if (imagenUrlBody && !isValidHttpUrl(imagenUrlBody)) {
+        return res.status(400).json({ error: 'La URL de imagen es invalida' });
+      }
+      insumo.imagen_url = imagenUrlBody;
+    }
     if (stockMinimo !== null) insumo.stock_minimo = stockMinimo;
     if (alertaVenc !== null) insumo.alerta_vencimiento_dias = alertaVenc;
     if (stockTotalRaw !== undefined) {
@@ -630,18 +628,6 @@ router.delete('/:id', async (req, res) => {
 
     const insumo = await Insumo.findOne({ _id: req.params.id, local: req.localId });
     if (!insumo) return res.status(404).json({ error: 'Insumo no encontrado' });
-
-    const tieneLotesReales = await InsumoLote.exists({
-      insumo: req.params.id,
-      local: req.localId,
-      $or: [
-        { lote: { $exists: true, $ne: '' } },
-        { fecha_vencimiento: { $ne: null } }
-      ]
-    });
-    if (tieneLotesReales) {
-      return res.status(400).json({ error: 'No se puede eliminar un insumo con lotes' });
-    }
 
     await Promise.all([
       Insumo.deleteOne({ _id: req.params.id, local: req.localId }),
@@ -836,7 +822,7 @@ router.get('/movimientos', async (req, res) => {
       filtro.insumo = req.query.insumo;
     }
     const movimientos = await InsumoMovimiento.find(filtro)
-      .populate('insumo', 'nombre')
+      .populate('insumo', 'nombre sku color talla')
       .sort({ fecha: -1 });
     res.json(movimientos);
   } catch (error) {
@@ -849,7 +835,9 @@ router.get('/:id/movimientos', async (req, res) => {
     const movimientos = await InsumoMovimiento.find({
       insumo: req.params.id,
       local: req.localId
-    }).sort({ fecha: -1 });
+    })
+      .populate('insumo', 'nombre sku color talla')
+      .sort({ fecha: -1 });
     res.json(movimientos);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener movimientos' });
@@ -996,39 +984,13 @@ router.post('/:id/movimientos', async (req, res) => {
           }
         }
 
-        const lotes = await InsumoLote.find({
-          insumo: refreshed._id,
-          local: req.localId,
-          $or: [{ activo: true }, { activo: { $exists: false } }],
-          cantidad: { $gt: 0 },
-          fecha_vencimiento: { $ne: null }
-        });
-        const { porVencer, vencidos } = evaluarVencimientos(
-          lotes,
-          Number(refreshed.alerta_vencimiento_dias || 7)
-        );
-        const tieneVencimientos = porVencer.length > 0 || vencidos.length > 0;
+        if (!debeAlertarStock) return;
 
-        let debeAlertarVenc = false;
-        let estadoVenc = null;
-        if (tieneVencimientos) {
-          estadoVenc = vencidos.length ? 'vencido' : 'por_vencer';
-          const ultimaFecha = refreshed.last_alerta_vencimiento_en
-            ? new Date(refreshed.last_alerta_vencimiento_en)
-            : null;
-          if (!sameDay(ultimaFecha, hoy) || refreshed.last_alerta_vencimiento_estado !== estadoVenc) {
-            debeAlertarVenc = true;
-          }
-        }
-
-        if (!debeAlertarStock && !debeAlertarVenc) return;
-
-        const subject = `Alerta de insumos - ${refreshed.nombre}`;
+        const subject = `Alerta de stock bodega - ${refreshed.nombre}`;
         const html = `
-          <h3>Alerta de insumo</h3>
+          <h3>Alerta de stock bodega</h3>
           <p><strong>${refreshed.nombre}</strong></p>
           ${debeAlertarStock ? `<p>Stock bajo: ${refreshed.stock_total} (min ${refreshed.stock_minimo})</p>` : ''}
-          ${debeAlertarVenc ? `<p>Vencimientos: ${vencidos.length} vencidos, ${porVencer.length} por vencer</p>` : ''}
         `;
 
         await sendMail({
@@ -1040,10 +1002,6 @@ router.post('/:id/movimientos', async (req, res) => {
 
         const update = {};
         if (debeAlertarStock) update.last_alerta_stock_en = hoy;
-        if (debeAlertarVenc) {
-          update.last_alerta_vencimiento_en = hoy;
-          update.last_alerta_vencimiento_estado = estadoVenc;
-        }
         if (Object.keys(update).length) {
           await Insumo.updateOne({ _id: refreshed._id }, update);
         }
