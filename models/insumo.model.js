@@ -18,6 +18,15 @@ const insumoSchema = new mongoose.Schema(
     color: { type: String, trim: true },
     talla: { type: String, trim: true },
     imagen_url: { type: String, trim: true },
+    producto_relacionado: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'ProductoLocal',
+      default: null
+    },
+    variante_relacionada: {
+      type: mongoose.Schema.Types.ObjectId,
+      default: null
+    },
     unidad: { type: String, required: true, trim: true },
     stock_total: { type: Number, default: 0 },
     stock_minimo: { type: Number, default: 0 },

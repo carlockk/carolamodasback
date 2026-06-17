@@ -5,6 +5,7 @@ const Insumo = require('../models/insumo.model');
 const InsumoLote = require('../models/insumoLote.model');
 const InsumoMovimiento = require('../models/insumoMovimiento.model');
 const InsumoAlertaConfig = require('../models/insumoAlertaConfig.model');
+const ProductoLocal = require('../models/productLocal.model');
 const Usuario = require('../models/usuario.model.js');
 const Local = require('../models/local.model');
 const { subirImagen } = require('../utils/cloudinary');
@@ -26,6 +27,31 @@ const parsePositiveNumber = (value, field) => {
 };
 
 const escapeRegex = (value = '') => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildExactMatch = (value) => ({
+  $regex: `^${escapeRegex(String(value || ''))}$`,
+  $options: 'i'
+});
+
+const normalizarTexto = (value = '') =>
+  String(value || '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+const calcularStockDesdeVariantes = (variantes = []) => {
+  const stocks = variantes
+    .map((vari) => {
+      if (vari?.stock === null || vari?.stock === undefined || vari?.stock === '') return null;
+      const valor = Number(vari.stock);
+      return Number.isFinite(valor) && valor >= 0 ? valor : null;
+    })
+    .filter((valor) => valor !== null);
+
+  if (stocks.length === 0) return null;
+  return stocks.reduce((acc, stock) => acc + stock, 0);
+};
 
 const isValidHttpUrl = (value) => {
   try {
@@ -58,6 +84,176 @@ const obtenerDestinatarios = async (localId) => {
   return usuarios
     .map((u) => ({ email: u.email, nombre: u.nombre }))
     .filter((u) => Boolean(u.email));
+};
+
+const construirFiltroDuplicadoInsumo = ({ nombre, sku, color, talla, localId, excludeId = null }) => {
+  const filtro = {
+    local: localId,
+    nombre: buildExactMatch(nombre),
+    sku: buildExactMatch(sku || ''),
+    color: buildExactMatch(color || ''),
+    talla: buildExactMatch(talla || '')
+  };
+
+  if (excludeId) {
+    filtro._id = { $ne: excludeId };
+  }
+
+  return filtro;
+};
+
+const resolverRelacionProducto = async ({ productoIdRaw, varianteIdRaw, localId, session }) => {
+  const productoId = String(productoIdRaw || '').trim();
+  const varianteId = String(varianteIdRaw || '').trim();
+
+  if (!productoId) {
+    return { producto: null, productoId: null, varianteId: null };
+  }
+
+  if (!mongoose.Types.ObjectId.isValid(productoId)) {
+    throw new Error('Producto relacionado invalido');
+  }
+
+  const producto = await ProductoLocal.findOne({ _id: productoId, local: localId })
+    .populate('productoBase', 'nombre sku descripcion imagen_url')
+    .session(session || null);
+
+  if (!producto) {
+    throw new Error('Producto relacionado no encontrado');
+  }
+
+  const variantes = Array.isArray(producto.variantes) ? producto.variantes : [];
+  if (variantes.length === 0) {
+    return { producto, productoId: producto._id, varianteId: null };
+  }
+
+  if (!varianteId) {
+    throw new Error('Debes seleccionar una variante relacionada');
+  }
+
+  const variante = variantes.find((item) => String(item?._id) === varianteId);
+  if (!variante) {
+    throw new Error('Variante relacionada invalida');
+  }
+
+  return { producto, productoId: producto._id, varianteId: variante._id };
+};
+
+const sincronizarSalidaBodegaConProducto = async ({ insumo, cantidad, localId, session }) => {
+  const productoRelacionadoId = String(insumo?.producto_relacionado || '').trim();
+  const varianteRelacionadaId = String(insumo?.variante_relacionada || '').trim();
+
+  if (productoRelacionadoId && mongoose.Types.ObjectId.isValid(productoRelacionadoId)) {
+    const productoRelacionado = await ProductoLocal.findOne({ _id: productoRelacionadoId, local: localId })
+      .session(session);
+
+    if (productoRelacionado) {
+      const variantes = Array.isArray(productoRelacionado.variantes) ? productoRelacionado.variantes : [];
+      const varianteRelacionada = varianteRelacionadaId
+        ? variantes.find((item) => String(item?._id) === varianteRelacionadaId)
+        : null;
+
+      if (varianteRelacionada) {
+        const stockActual = Number(varianteRelacionada.stock);
+        varianteRelacionada.stock =
+          Number.isFinite(stockActual) && stockActual >= 0 ? stockActual + cantidad : cantidad;
+        productoRelacionado.stock = calcularStockDesdeVariantes(productoRelacionado.variantes);
+        await productoRelacionado.save({ session });
+        return {
+          productoId: productoRelacionado._id,
+          varianteId: varianteRelacionada._id
+        };
+      }
+
+      if (variantes.length === 0) {
+        const stockActual = Number(productoRelacionado.stock);
+        productoRelacionado.stock =
+          Number.isFinite(stockActual) && stockActual >= 0 ? stockActual + cantidad : cantidad;
+        await productoRelacionado.save({ session });
+        return {
+          productoId: productoRelacionado._id,
+          varianteId: null
+        };
+      }
+    }
+  }
+
+  const nombre = normalizarTexto(insumo?.nombre);
+  const sku = normalizarTexto(insumo?.sku);
+  const color = normalizarTexto(insumo?.color);
+  const talla = normalizarTexto(insumo?.talla);
+
+  if (!nombre && !sku) return null;
+
+  const productos = await ProductoLocal.find({ local: localId })
+    .populate('productoBase', 'nombre sku')
+    .session(session);
+
+  let productoMatch = null;
+  let varianteMatch = null;
+
+  if (sku) {
+    for (const producto of productos) {
+      const baseSku = normalizarTexto(producto?.productoBase?.sku);
+      if (baseSku && baseSku === sku) {
+        productoMatch = producto;
+        break;
+      }
+
+      const variante = Array.isArray(producto?.variantes)
+        ? producto.variantes.find((item) => normalizarTexto(item?.sku) === sku)
+        : null;
+      if (variante) {
+        productoMatch = producto;
+        varianteMatch = variante;
+        break;
+      }
+    }
+  }
+
+  if (!productoMatch) {
+    for (const producto of productos) {
+      const nombreProducto = normalizarTexto(producto?.productoBase?.nombre);
+      if (!nombreProducto || nombreProducto !== nombre) continue;
+
+      const variante = Array.isArray(producto?.variantes)
+        ? producto.variantes.find((item) => {
+            const colorVariante = normalizarTexto(item?.color);
+            const tallaVariante = normalizarTexto(item?.talla);
+            return colorVariante === color && tallaVariante === talla;
+          })
+        : null;
+
+      if (variante) {
+        productoMatch = producto;
+        varianteMatch = variante;
+        break;
+      }
+
+      if ((!color && !talla) || !Array.isArray(producto?.variantes) || producto.variantes.length === 0) {
+        productoMatch = producto;
+        break;
+      }
+    }
+  }
+
+  if (!productoMatch) return null;
+
+  if (varianteMatch) {
+    const stockActual = Number(varianteMatch.stock);
+    varianteMatch.stock = Number.isFinite(stockActual) && stockActual >= 0 ? stockActual + cantidad : cantidad;
+    productoMatch.stock = calcularStockDesdeVariantes(productoMatch.variantes);
+  } else {
+    const stockActual = Number(productoMatch.stock);
+    productoMatch.stock = Number.isFinite(stockActual) && stockActual >= 0 ? stockActual + cantidad : cantidad;
+  }
+
+  await productoMatch.save({ session });
+
+  return {
+    productoId: productoMatch._id,
+    varianteId: varianteMatch?._id || null
+  };
 };
 
 router.get('/', async (req, res) => {
@@ -406,6 +602,8 @@ router.post('/clonar', async (req, res) => {
         color: insumo.color || '',
         talla: insumo.talla || '',
         imagen_url: insumo.imagen_url || '',
+        producto_relacionado: null,
+        variante_relacionada: null,
         unidad: insumo.unidad,
         stock_total: 0,
         stock_minimo: insumo.stock_minimo || 0,
@@ -432,6 +630,159 @@ router.post('/clonar', async (req, res) => {
   }
 });
 
+router.post('/importar-productos', async (req, res) => {
+  try {
+    if (!['admin', 'superadmin'].includes(req.userRole)) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    const importarTodos = Boolean(req.body?.importarTodos);
+    const productoIdsRaw = Array.isArray(req.body?.productoIds) ? req.body.productoIds : [];
+    const productoIds = Array.from(
+      new Set(productoIdsRaw.map((id) => String(id || '').trim()).filter((id) => mongoose.Types.ObjectId.isValid(id)))
+    );
+
+    if (!importarTodos && productoIds.length === 0) {
+      return res.status(400).json({ error: 'Debes seleccionar al menos un producto' });
+    }
+
+    const filtro = { local: req.localId };
+    if (!importarTodos) {
+      filtro._id = { $in: productoIds };
+    }
+
+    const productos = await ProductoLocal.find(filtro)
+      .populate('productoBase', 'nombre descripcion sku imagen_url')
+      .lean();
+
+    if (!productos.length) {
+      return res.status(400).json({ error: 'No se encontraron productos para importar' });
+    }
+
+    const existentes = await Insumo.find({ local: req.localId })
+      .select('producto_relacionado variante_relacionada nombre sku color talla')
+      .lean();
+
+    const relacionesExistentes = new Set(
+      existentes.map((item) => {
+        const prod = String(item?.producto_relacionado || '');
+        const vari = String(item?.variante_relacionada || '');
+        return `${prod}::${vari}`;
+      })
+    );
+
+    const coincidenciasTexto = new Set(
+      existentes.map((item) =>
+        [
+          normalizarTexto(item?.nombre),
+          normalizarTexto(item?.sku),
+          normalizarTexto(item?.color),
+          normalizarTexto(item?.talla)
+        ].join('::')
+      )
+    );
+
+    const nuevos = [];
+    let omitidos = 0;
+
+    for (const producto of productos) {
+      const base = producto?.productoBase || {};
+      const variantes = Array.isArray(producto?.variantes) ? producto.variantes : [];
+
+      if (variantes.length > 0) {
+        for (const variante of variantes) {
+          const relationKey = `${String(producto._id)}::${String(variante?._id || '')}`;
+          const textKey = [
+            normalizarTexto(base.nombre),
+            normalizarTexto(variante?.sku || base.sku),
+            normalizarTexto(variante?.color),
+            normalizarTexto(variante?.talla)
+          ].join('::');
+
+          if (relacionesExistentes.has(relationKey) || coincidenciasTexto.has(textKey)) {
+            omitidos += 1;
+            continue;
+          }
+
+          nuevos.push({
+            nombre: base.nombre || 'Producto sin nombre',
+            descripcion: base.descripcion || '',
+            sku: variante?.sku || base.sku || '',
+            color: variante?.color || '',
+            talla: variante?.talla || '',
+            imagen_url: base.imagen_url || '',
+            producto_relacionado: producto._id,
+            variante_relacionada: variante?._id || null,
+            unidad: 'unid',
+            stock_total: 0,
+            stock_minimo: 0,
+            alerta_vencimiento_dias: 7,
+            local: req.localId,
+            activo: true,
+            creado_en: new Date(),
+            actualizado_en: new Date()
+          });
+          relacionesExistentes.add(relationKey);
+          coincidenciasTexto.add(textKey);
+        }
+        continue;
+      }
+
+      const relationKey = `${String(producto._id)}::`;
+      const textKey = [
+        normalizarTexto(base.nombre),
+        normalizarTexto(base.sku),
+        '',
+        ''
+      ].join('::');
+
+      if (relacionesExistentes.has(relationKey) || coincidenciasTexto.has(textKey)) {
+        omitidos += 1;
+        continue;
+      }
+
+      nuevos.push({
+        nombre: base.nombre || 'Producto sin nombre',
+        descripcion: base.descripcion || '',
+        sku: base.sku || '',
+        color: '',
+        talla: '',
+        imagen_url: base.imagen_url || '',
+        producto_relacionado: producto._id,
+        variante_relacionada: null,
+        unidad: 'unid',
+        stock_total: 0,
+        stock_minimo: 0,
+        alerta_vencimiento_dias: 7,
+        local: req.localId,
+        activo: true,
+        creado_en: new Date(),
+        actualizado_en: new Date()
+      });
+      relacionesExistentes.add(relationKey);
+      coincidenciasTexto.add(textKey);
+    }
+
+    if (!nuevos.length) {
+      return res.json({
+        mensaje: 'No habia productos nuevos para importar',
+        creados: 0,
+        omitidos
+      });
+    }
+
+    await Insumo.insertMany(nuevos);
+
+    return res.json({
+      mensaje: `Importacion completada. Creados: ${nuevos.length}, Omitidos: ${omitidos}`,
+      creados: nuevos.length,
+      omitidos
+    });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || 'Error al importar productos' });
+  }
+});
+
 router.post('/', upload.single('imagen'), async (req, res) => {
   try {
     const nombre = sanitizeText(req.body.nombre, { max: 120 });
@@ -448,6 +799,8 @@ router.post('/', upload.single('imagen'), async (req, res) => {
     const stockTotalRaw = req.body.stock_total;
     const stockMinimo = toNumberOrNull(req.body.stock_minimo);
     const alertaVenc = toNumberOrNull(req.body.alerta_vencimiento_dias);
+    const productoRelacionadoRaw = req.body.producto_relacionado;
+    const varianteRelacionadaRaw = req.body.variante_relacionada;
 
     if (!nombre || !unidad) {
       return res.status(400).json({ error: 'Nombre y unidad son requeridos' });
@@ -464,12 +817,17 @@ router.post('/', upload.single('imagen'), async (req, res) => {
       imagen_url = imagenUrlBody;
     }
 
-    const existe = await Insumo.findOne({
-      nombre: { $regex: `^${escapeRegex(nombre)}$`, $options: 'i' },
-      local: req.localId
-    });
+    const existe = await Insumo.findOne(
+      construirFiltroDuplicadoInsumo({
+        nombre,
+        sku,
+        color,
+        talla,
+        localId: req.localId
+      })
+    );
     if (existe) {
-      return res.status(400).json({ error: 'Ya existe un insumo con ese nombre' });
+      return res.status(400).json({ error: 'Ya existe un producto bodega con esos datos' });
     }
 
     let categoriaId = null;
@@ -480,6 +838,17 @@ router.post('/', upload.single('imagen'), async (req, res) => {
       categoriaId = categoriaRaw;
     }
 
+    let relacionProducto;
+    try {
+      relacionProducto = await resolverRelacionProducto({
+        productoIdRaw: productoRelacionadoRaw,
+        varianteIdRaw: varianteRelacionadaRaw,
+        localId: req.localId
+      });
+    } catch (validationError) {
+      return res.status(400).json({ error: validationError.message });
+    }
+
     const nuevo = new Insumo({
       nombre,
       descripcion,
@@ -487,6 +856,8 @@ router.post('/', upload.single('imagen'), async (req, res) => {
       color,
       talla,
       imagen_url,
+      producto_relacionado: relacionProducto.productoId,
+      variante_relacionada: relacionProducto.varianteId,
       unidad,
       stock_minimo: stockMinimo ?? 0,
       alerta_vencimiento_dias: alertaVenc ?? 7,
@@ -517,18 +888,25 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
     const stockTotalRaw = req.body.stock_total;
     const stockMinimo = toNumberOrNull(req.body.stock_minimo);
     const alertaVenc = toNumberOrNull(req.body.alerta_vencimiento_dias);
+    const productoRelacionadoRaw = req.body.producto_relacionado;
+    const varianteRelacionadaRaw = req.body.variante_relacionada;
 
     const insumo = await Insumo.findOne({ _id: req.params.id, local: req.localId });
     if (!insumo) return res.status(404).json({ error: 'Insumo no encontrado' });
 
     if (nombre) {
-      const duplicado = await Insumo.findOne({
-        _id: { $ne: req.params.id },
-        local: req.localId,
-        nombre: { $regex: `^${escapeRegex(nombre)}$`, $options: 'i' }
-      });
+      const duplicado = await Insumo.findOne(
+        construirFiltroDuplicadoInsumo({
+          nombre,
+          sku,
+          color,
+          talla,
+          localId: req.localId,
+          excludeId: req.params.id
+        })
+      );
       if (duplicado) {
-        return res.status(400).json({ error: 'Ya existe un insumo con ese nombre' });
+        return res.status(400).json({ error: 'Ya existe un producto bodega con esos datos' });
       }
     }
 
@@ -564,6 +942,20 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
       } else {
         insumo.categoria = categoriaRaw;
       }
+    }
+    if (productoRelacionadoRaw !== undefined || varianteRelacionadaRaw !== undefined) {
+      let relacionProducto;
+      try {
+        relacionProducto = await resolverRelacionProducto({
+          productoIdRaw: productoRelacionadoRaw,
+          varianteIdRaw: varianteRelacionadaRaw,
+          localId: req.localId
+        });
+      } catch (validationError) {
+        return res.status(400).json({ error: validationError.message });
+      }
+      insumo.producto_relacionado = relacionProducto.productoId;
+      insumo.variante_relacionada = relacionProducto.varianteId;
     }
     insumo.actualizado_en = new Date();
 
@@ -942,6 +1334,12 @@ router.post('/:id/movimientos', async (req, res) => {
       }
 
       insumo.stock_total = Math.max(0, insumo.stock_total - cantidad);
+      await sincronizarSalidaBodegaConProducto({
+        insumo,
+        cantidad,
+        localId: req.localId,
+        session
+      });
     }
 
     const notaFinal = nota ? String(nota).trim() : '';
