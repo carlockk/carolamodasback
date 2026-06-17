@@ -11,7 +11,14 @@ cloudinary.config({
 const subirImagen = (file) => {
   return new Promise((resolve, reject) => {
     const stream = cloudinary.uploader.upload_stream(
-      { folder: "productos" },
+      {
+        folder: "productos",
+        quality: "auto:good",
+        fetch_format: "auto",
+        transformation: [
+          { width: 900, height: 900, crop: "limit" }
+        ]
+      },
       (error, result) => {
         if (error) reject(error);
         else resolve(result);

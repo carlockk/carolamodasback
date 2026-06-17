@@ -333,6 +333,13 @@ const calcularStockTotal = (variantes, stockBase) => {
   return stockBase;
 };
 
+const optimizarImagenCatalogo = (url) => {
+  const value = String(url || '');
+  if (!value.includes('res.cloudinary.com') || !value.includes('/upload/')) return value;
+  if (value.includes('/upload/f_auto,q_auto')) return value;
+  return value.replace('/upload/', '/upload/f_auto,q_auto:good,w_600,c_limit/');
+};
+
 const proyectarProductoLocal = (productoLocal, agregadosOverride = null) => {
   const base = productoLocal?.productoBase || {};
   const sourceAgregados = Array.isArray(agregadosOverride)
@@ -365,7 +372,7 @@ const proyectarProductoLocal = (productoLocal, agregadosOverride = null) => {
     productoBaseId: base._id || null,
     nombre: base.nombre || '',
     descripcion: base.descripcion || '',
-    imagen_url: base.imagen_url || '',
+    imagen_url: optimizarImagenCatalogo(base.imagen_url),
     cloudinary_id: base.cloudinary_id || '',
     categoria: base.categoria || null
   };
