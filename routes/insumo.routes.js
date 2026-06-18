@@ -139,6 +139,31 @@ const resolverRelacionProducto = async ({ productoIdRaw, varianteIdRaw, localId,
   return { producto, productoId: producto._id, varianteId: variante._id };
 };
 
+const buscarVarianteRelacionada = (producto, insumo) => {
+  const variantes = Array.isArray(producto?.variantes) ? producto.variantes : [];
+  if (variantes.length === 0) return null;
+
+  const sku = normalizarTexto(insumo?.sku);
+  const color = normalizarTexto(insumo?.color);
+  const talla = normalizarTexto(insumo?.talla);
+
+  if (sku) {
+    const variantePorSku = variantes.find((item) => normalizarTexto(item?.sku) === sku);
+    if (variantePorSku) return variantePorSku;
+  }
+
+  if (color || talla) {
+    const variantePorAtributos = variantes.find((item) => {
+      const colorVariante = normalizarTexto(item?.color);
+      const tallaVariante = normalizarTexto(item?.talla);
+      return colorVariante === color && tallaVariante === talla;
+    });
+    if (variantePorAtributos) return variantePorAtributos;
+  }
+
+  return null;
+};
+
 const sincronizarSalidaBodegaConProducto = async ({ insumo, cantidad, localId, session }) => {
   const productoRelacionadoId = String(insumo?.producto_relacionado || '').trim();
   const varianteRelacionadaId = String(insumo?.variante_relacionada || '').trim();
@@ -153,15 +178,17 @@ const sincronizarSalidaBodegaConProducto = async ({ insumo, cantidad, localId, s
         ? variantes.find((item) => String(item?._id) === varianteRelacionadaId)
         : null;
 
-      if (varianteRelacionada) {
-        const stockActual = Number(varianteRelacionada.stock);
-        varianteRelacionada.stock =
+      const varianteResuelta = varianteRelacionada || buscarVarianteRelacionada(productoRelacionado, insumo);
+
+      if (varianteResuelta) {
+        const stockActual = Number(varianteResuelta.stock);
+        varianteResuelta.stock =
           Number.isFinite(stockActual) && stockActual >= 0 ? stockActual + cantidad : cantidad;
         productoRelacionado.stock = calcularStockDesdeVariantes(productoRelacionado.variantes);
         await productoRelacionado.save({ session });
         return {
           productoId: productoRelacionado._id,
-          varianteId: varianteRelacionada._id
+          varianteId: varianteResuelta._id
         };
       }
 
@@ -194,12 +221,6 @@ const sincronizarSalidaBodegaConProducto = async ({ insumo, cantidad, localId, s
 
   if (sku) {
     for (const producto of productos) {
-      const baseSku = normalizarTexto(producto?.productoBase?.sku);
-      if (baseSku && baseSku === sku) {
-        productoMatch = producto;
-        break;
-      }
-
       const variante = Array.isArray(producto?.variantes)
         ? producto.variantes.find((item) => normalizarTexto(item?.sku) === sku)
         : null;
@@ -231,6 +252,16 @@ const sincronizarSalidaBodegaConProducto = async ({ insumo, cantidad, localId, s
       }
 
       if ((!color && !talla) || !Array.isArray(producto?.variantes) || producto.variantes.length === 0) {
+        productoMatch = producto;
+        break;
+      }
+    }
+  }
+
+  if (!productoMatch && sku) {
+    for (const producto of productos) {
+      const baseSku = normalizarTexto(producto?.productoBase?.sku);
+      if (baseSku && baseSku === sku) {
         productoMatch = producto;
         break;
       }
@@ -290,6 +321,41 @@ router.put('/orden', async (req, res) => {
     res.json({ mensaje: 'Orden actualizado' });
   } catch (error) {
     res.status(500).json({ error: 'Error al actualizar orden' });
+  }
+});
+
+router.put('/categoria-masiva', async (req, res) => {
+  try {
+    if (!['admin', 'superadmin'].includes(req.userRole)) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    const idsRaw = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const ids = Array.from(new Set(idsRaw.filter((id) => mongoose.Types.ObjectId.isValid(id))));
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Debes seleccionar al menos un producto bodega' });
+    }
+
+    const categoriaRaw = req.body?.categoria;
+    let categoria = null;
+    if (categoriaRaw !== null && categoriaRaw !== undefined && String(categoriaRaw).trim() !== '') {
+      if (!mongoose.Types.ObjectId.isValid(categoriaRaw)) {
+        return res.status(400).json({ error: 'Categoria invalida' });
+      }
+      categoria = categoriaRaw;
+    }
+
+    const result = await Insumo.updateMany(
+      { _id: { $in: ids }, local: req.localId },
+      { categoria, actualizado_en: new Date() }
+    );
+
+    res.json({
+      mensaje: 'Categoria actualizada',
+      modificados: result.modifiedCount || 0
+    });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Error al mover productos de bodega' });
   }
 });
 
@@ -1009,6 +1075,30 @@ router.delete('/movimientos/:movId', async (req, res) => {
     res.json({ mensaje: 'Movimiento eliminado' });
   } catch (error) {
     res.status(500).json({ error: 'Error al eliminar movimiento' });
+  }
+});
+
+router.delete('/', async (req, res) => {
+  try {
+    if (!['admin', 'superadmin'].includes(req.userRole)) {
+      return res.status(403).json({ error: 'No autorizado' });
+    }
+
+    const idsRaw = Array.isArray(req.body?.ids) ? req.body.ids : [];
+    const ids = Array.from(new Set(idsRaw.filter((id) => mongoose.Types.ObjectId.isValid(id))));
+    if (ids.length === 0) {
+      return res.status(400).json({ error: 'Debes seleccionar al menos un producto bodega' });
+    }
+
+    await Promise.all([
+      Insumo.deleteMany({ _id: { $in: ids }, local: req.localId }),
+      InsumoLote.deleteMany({ insumo: { $in: ids }, local: req.localId }),
+      InsumoMovimiento.deleteMany({ insumo: { $in: ids }, local: req.localId })
+    ]);
+
+    res.json({ mensaje: 'Productos de bodega eliminados' });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Error al eliminar productos de bodega' });
   }
 });
 
