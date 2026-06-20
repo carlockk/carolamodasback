@@ -65,12 +65,52 @@ const calcularDescuento = (montoBase, descuento) => {
   return Math.min(base, calculado);
 };
 
+const normalizarDescuentoManual = (raw) => {
+  if (!raw || typeof raw !== 'object') return null;
+  const tipo = raw.tipo === 'porcentaje' ? 'porcentaje' : raw.tipo === 'fijo' ? 'fijo' : null;
+  const valor = Number(raw.valor);
+  if (!tipo || !Number.isFinite(valor) || valor <= 0) return null;
+  return {
+    descuentoId: null,
+    nombre: sanitizeOptionalText(raw.nombre, { max: 80 }) || 'Descuento manual',
+    tipo,
+    valor: tipo === 'porcentaje'
+      ? Math.min(Math.max(valor, 0), 100)
+      : Math.round(Math.max(valor, 0)),
+    manual: true
+  };
+};
+
+const resolverDescuento = async (raw, localId, session, mensajeNoDisponible) => {
+  if (!raw || typeof raw !== 'object') return null;
+
+  const descuentoId = raw.descuentoId || raw._id || null;
+  if (descuentoId) {
+    if (!mongoose.Types.ObjectId.isValid(descuentoId)) {
+      const error = new Error('El descuento seleccionado es invalido.');
+      error.status = 400;
+      throw error;
+    }
+
+    const descuento = await Descuento.findOne({ _id: descuentoId, local: localId, activo: true }).session(session);
+    if (!descuento) {
+      const error = new Error(mensajeNoDisponible);
+      error.status = 400;
+      throw error;
+    }
+    return descuento;
+  }
+
+  return normalizarDescuentoManual(raw);
+};
+
 const snapshotDescuento = (descuento, monto) => descuento ? ({
-  descuentoId: descuento._id,
+  descuentoId: descuento.descuentoId || descuento._id || null,
   nombre: descuento.nombre,
   tipo: descuento.tipo,
   valor: descuento.valor,
-  monto
+  monto,
+  manual: Boolean(descuento.manual) || !(descuento.descuentoId || descuento._id)
 }) : null;
 
 const obtenerPagosAplicados = (venta) => {
@@ -598,15 +638,12 @@ router.post('/', async (req, res) => {
     let subtotalBruto = 0;
     let subtotalConDescuentosItem = 0;
 
-    const descuentoVentaId = descuento_venta?.descuentoId || descuento_venta?._id || null;
-    const descuentoVenta = descuentoVentaId && mongoose.Types.ObjectId.isValid(descuentoVentaId)
-      ? await Descuento.findOne({ _id: descuentoVentaId, local: req.localId, activo: true }).session(session)
-      : null;
-    if (descuentoVentaId && !descuentoVenta) {
-      const error = new Error('El descuento general seleccionado no esta disponible.');
-      error.status = 400;
-      throw error;
-    }
+    const descuentoVenta = await resolverDescuento(
+      descuento_venta,
+      req.localId,
+      session,
+      'El descuento general seleccionado no esta disponible.'
+    );
 
     for (const item of productos) {
       if (!item?.productoId) {
@@ -693,15 +730,12 @@ router.post('/', async (req, res) => {
               : producto.precio)
         ) || 0;
 
-      const descuentoItemId = item?.descuento?.descuentoId || item?.descuento?._id || null;
-      const descuentoItem = descuentoItemId && mongoose.Types.ObjectId.isValid(descuentoItemId)
-        ? await Descuento.findOne({ _id: descuentoItemId, local: req.localId, activo: true }).session(session)
-        : null;
-      if (descuentoItemId && !descuentoItem) {
-        const error = new Error(`El descuento de ${nombreProducto} no esta disponible.`);
-        error.status = 400;
-        throw error;
-      }
+      const descuentoItem = await resolverDescuento(
+        item?.descuento,
+        req.localId,
+        session,
+        `El descuento de ${nombreProducto} no esta disponible.`
+      );
       const montoDescuentoUnitario = calcularDescuento(precioOriginal, descuentoItem);
       const precioUnitario = Math.max(0, precioOriginal - montoDescuentoUnitario);
       subtotalBruto += precioOriginal * cantidadSolicitada;
