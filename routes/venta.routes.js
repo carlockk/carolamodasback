@@ -198,7 +198,21 @@ const armarResumenPorProducto = (ventas = []) => {
 
   ventas.forEach((venta) => {
     venta.productos?.forEach((item) => {
-      const nombre = item?.nombre || 'Producto sin nombre';
+      const nombreBase = item?.nombre || 'Producto sin nombre';
+      const atributos = Array.isArray(item?.atributos) ? item.atributos : [];
+      const detalleAtributos = atributos
+        .map((atributo) => {
+          const nombre = sanitizeOptionalText(atributo?.nombre, { max: 30 }) || '';
+          const valor = sanitizeOptionalText(atributo?.valor, { max: 60 }) || '';
+          if (!nombre || !valor) return null;
+          return `${nombre}: ${valor}`;
+        })
+        .filter(Boolean);
+      const varianteNombre = sanitizeOptionalText(item?.varianteNombre, { max: 80 }) || '';
+      const detalle = detalleAtributos.length > 0
+        ? detalleAtributos.join(' | ')
+        : varianteNombre;
+      const nombre = detalle ? `${nombreBase} (${detalle})` : nombreBase;
       const cantidad = Number(item?.cantidad) || 0;
       const precio = Number(item?.precio_unitario) || 0;
       if (cantidad <= 0 || precio < 0) return;
