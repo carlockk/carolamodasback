@@ -333,6 +333,21 @@ const calcularStockTotal = (variantes, stockBase) => {
   return stockBase;
 };
 
+const variantesBaseEquivalentes = (actuales = [], nuevas = []) => {
+  if (!Array.isArray(actuales) || !Array.isArray(nuevas)) return false;
+  if (actuales.length !== nuevas.length) return false;
+
+  return actuales.every((actual, index) => {
+    const siguiente = nuevas[index];
+    return (
+      String(actual?.nombre || '') === String(siguiente?.nombre || '') &&
+      String(actual?.color || '') === String(siguiente?.color || '') &&
+      String(actual?.talla || '') === String(siguiente?.talla || '') &&
+      String(actual?.sku || '') === String(siguiente?.sku || '')
+    );
+  });
+};
+
 const optimizarImagenCatalogo = (url) => {
   const value = String(url || '');
   if (!value.includes('res.cloudinary.com') || !value.includes('/upload/')) return value;
@@ -755,22 +770,12 @@ router.post('/', upload.single('imagen'), async (req, res) => {
     });
 
     const localGuardado = await local.save();
-    const poblado = await localGuardado.populate([
-      {
-        path: 'productoBase',
-        populate: { path: 'categoria', select: 'nombre parent' }
-      },
-      {
-        path: 'agregados',
-        select: 'nombre precio activo grupo grupos',
-        populate: [
-          { path: 'grupo', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' },
-          { path: 'grupos', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' }
-        ]
-      }
-    ]);
 
-    res.status(201).json(proyectarProductoLocal(poblado));
+    res.status(201).json({
+      mensaje: 'Producto creado correctamente',
+      productoId: localGuardado._id,
+      productoBaseId: baseGuardado._id
+    });
   } catch (err) {
     console.error('❌ Error al crear producto:', err);
     res.status(400).json({ error: err.message });
@@ -789,66 +794,7 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
         throw new Error('Producto base no encontrado para este local');
       }
 
-      const usosBase = await ProductoLocal.countDocuments({
-        productoBase: productoLocal.productoBase._id
-      });
-      const baseEraCompartida = usosBase > 1;
-
       let baseEditable = productoLocal.productoBase;
-      if (baseEraCompartida) {
-        baseEditable = new ProductoBase({
-          sku: baseEditable.sku || '',
-          nombre: baseEditable.nombre,
-          descripcion: baseEditable.descripcion || '',
-          imagen_url: baseEditable.imagen_url || '',
-          cloudinary_id: baseEditable.cloudinary_id || '',
-          categoria: baseEditable.categoria || null,
-          variantes: Array.isArray(baseEditable.variantes)
-            ? baseEditable.variantes.map((v) => ({
-                _id: v._id,
-                nombre: v.nombre,
-                color: v.color,
-                talla: v.talla,
-                sku: v.sku
-              }))
-            : []
-        });
-        await baseEditable.save();
-        productoLocal.productoBase = baseEditable._id;
-      }
-
-      let imagen_url = baseEditable?.imagen_url || '';
-      let cloudinary_id = baseEditable?.cloudinary_id || '';
-      const imagenUrlBody = sanitizeOptionalText(req.body.imagen_url, { max: 600 }) || '';
-
-      if (req.file) {
-        if (cloudinary_id && !baseEraCompartida) await eliminarImagen(cloudinary_id);
-        const subida = await subirImagen(req.file);
-        imagen_url = subida.secure_url;
-        cloudinary_id = subida.public_id;
-      } else if (req.body.imagen_url !== undefined) {
-        if (imagenUrlBody && !isValidHttpUrl(imagenUrlBody)) {
-          throw new Error('La URL de imagen es invalida');
-        }
-        if (!imagenUrlBody) {
-          if (cloudinary_id) {
-            if (!baseEraCompartida) {
-              await eliminarImagen(cloudinary_id);
-            }
-            cloudinary_id = '';
-          }
-          imagen_url = '';
-        } else {
-          const remoteFile = await fetchImageBufferFromUrl(imagenUrlBody);
-          const subida = await subirImagen(remoteFile);
-          const cloudinaryAnterior = cloudinary_id;
-          imagen_url = subida.secure_url;
-          cloudinary_id = subida.public_id;
-          if (cloudinaryAnterior && !baseEraCompartida) {
-            await eliminarImagen(cloudinaryAnterior);
-          }
-        }
-      }
 
       const nombre = sanitizeText(req.body.nombre, { max: 120 });
       if (!nombre) {
@@ -903,6 +849,81 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
         await validarCategoriaProducto({ localId: req.localId, categoriaId });
       }
 
+      const categoriaActualId = baseEditable?.categoria ? String(baseEditable.categoria) : '';
+      const categoriaNuevaId = categoriaId ? String(categoriaId) : '';
+      const imagenActual = String(baseEditable?.imagen_url || '');
+      const imagenUrlBody = sanitizeOptionalText(req.body.imagen_url, { max: 600 }) || '';
+      const hayCambioExplicitoImagen =
+        req.file || (req.body.imagen_url !== undefined && imagenUrlBody !== imagenActual);
+      const hayCambiosBase =
+        String(baseEditable?.nombre || '') !== nombre ||
+        String(baseEditable?.descripcion || '') !== descripcion ||
+        categoriaActualId !== categoriaNuevaId ||
+        !variantesBaseEquivalentes(baseActuales, variantesBaseActualizadas) ||
+        hayCambioExplicitoImagen;
+
+      let baseEraCompartida = false;
+      if (hayCambiosBase) {
+        const usosBase = await ProductoLocal.countDocuments({
+          productoBase: productoLocal.productoBase._id
+        });
+        baseEraCompartida = usosBase > 1;
+
+        if (baseEraCompartida) {
+          baseEditable = new ProductoBase({
+            sku: baseEditable.sku || '',
+            nombre: baseEditable.nombre,
+            descripcion: baseEditable.descripcion || '',
+            imagen_url: baseEditable.imagen_url || '',
+            cloudinary_id: baseEditable.cloudinary_id || '',
+            categoria: baseEditable.categoria || null,
+            variantes: Array.isArray(baseEditable.variantes)
+              ? baseEditable.variantes.map((v) => ({
+                  _id: v._id,
+                  nombre: v.nombre,
+                  color: v.color,
+                  talla: v.talla,
+                  sku: v.sku
+                }))
+              : []
+          });
+          await baseEditable.save();
+          productoLocal.productoBase = baseEditable._id;
+        }
+      }
+
+      let imagen_url = baseEditable?.imagen_url || '';
+      let cloudinary_id = baseEditable?.cloudinary_id || '';
+
+      if (hayCambiosBase && req.file) {
+        if (cloudinary_id && !baseEraCompartida) await eliminarImagen(cloudinary_id);
+        const subida = await subirImagen(req.file);
+        imagen_url = subida.secure_url;
+        cloudinary_id = subida.public_id;
+      } else if (hayCambiosBase && req.body.imagen_url !== undefined) {
+        if (imagenUrlBody && !isValidHttpUrl(imagenUrlBody)) {
+          throw new Error('La URL de imagen es invalida');
+        }
+        if (!imagenUrlBody) {
+          if (cloudinary_id) {
+            if (!baseEraCompartida) {
+              await eliminarImagen(cloudinary_id);
+            }
+            cloudinary_id = '';
+          }
+          imagen_url = '';
+        } else if (imagenUrlBody !== imagenActual) {
+          const remoteFile = await fetchImageBufferFromUrl(imagenUrlBody);
+          const subida = await subirImagen(remoteFile);
+          const cloudinaryAnterior = cloudinary_id;
+          imagen_url = subida.secure_url;
+          cloudinary_id = subida.public_id;
+          if (cloudinaryAnterior && !baseEraCompartida) {
+            await eliminarImagen(cloudinaryAnterior);
+          }
+        }
+      }
+
       let agregadosValidos = [];
       if (agregadosRaw.length > 0) {
         agregadosValidos = await Agregado.find(
@@ -916,7 +937,7 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
         ).lean();
       }
 
-      if (baseEditable) {
+      if (hayCambiosBase && baseEditable) {
         baseEditable.nombre = nombre;
         baseEditable.descripcion = descripcion;
         baseEditable.categoria = categoriaId || null;
@@ -932,21 +953,11 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
       productoLocal.variantes = variantes;
 
       const actualizado = await productoLocal.save();
-      const poblado = await actualizado.populate([
-        {
-          path: 'productoBase',
-          populate: { path: 'categoria', select: 'nombre parent' }
-        },
-        {
-          path: 'agregados',
-          select: 'nombre precio activo grupo grupos',
-          populate: [
-            { path: 'grupo', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' },
-            { path: 'grupos', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' }
-          ]
-        }
-      ]);
-      return res.json(proyectarProductoLocal(poblado));
+      return res.json({
+        mensaje: 'Producto actualizado correctamente',
+        productoId: actualizado._id,
+        productoBaseId: productoLocal.productoBase
+      });
     }
 
     return res.status(404).json({ error: 'Producto no encontrado' });
