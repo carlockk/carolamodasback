@@ -140,9 +140,14 @@ const calcularStockDesdeVariantes = (variantes = []) => {
   return stocks.reduce((acc, stock) => acc + stock, 0);
 };
 
+const toPlainVenta = (venta) => {
+  if (!venta) return {};
+  return typeof venta.toObject === 'function' ? venta.toObject() : venta;
+};
+
 const consolidarVentas = (ventasPos = [], ventasWeb = []) => ([
-  ...ventasPos.map((venta) => ({ ...venta.toObject(), canal: 'POS' })),
-  ...ventasWeb.map((venta) => ({ ...venta.toObject(), canal: 'WEB' }))
+  ...ventasPos.map((venta) => ({ ...toPlainVenta(venta), canal: 'POS' })),
+  ...ventasWeb.map((venta) => ({ ...toPlainVenta(venta), canal: 'WEB' }))
 ]);
 
 const armarDesglosePorTipoProducto = async (ventas = [], localId) => {
@@ -163,10 +168,14 @@ const armarDesglosePorTipoProducto = async (ventas = [], localId) => {
   const productosLocal = await ProductoLocal.find({
     _id: { $in: idsArray },
     local: localId
-  }).populate({
-    path: 'productoBase',
-    populate: { path: 'categoria', select: 'nombre' }
-  });
+  })
+    .select('productoBase')
+    .populate({
+      path: 'productoBase',
+      select: 'categoria',
+      populate: { path: 'categoria', select: 'nombre' }
+    })
+    .lean();
 
   const categoriaPorProducto = new Map();
   productosLocal.forEach((producto) => {
@@ -281,12 +290,18 @@ router.get('/', async (req, res) => {
     }
 
     const ventas = await Venta.find(filtro)
+      .select('productos subtotal descuento_total descuento_venta total tipo_pago pagos tipo_pedido monto_recibido vuelto fecha numero_pedido local usuario')
       .populate('usuario', 'nombre email rol')
-      .sort({ fecha: -1 });
+      .sort({ fecha: -1 })
+      .lean();
     const devoluciones = await Devolucion.find({
       venta: { $in: ventas.map((venta) => venta._id) },
       local: req.localId
-    }).populate('usuario', 'nombre email').sort({ fecha: -1 });
+    })
+      .select('venta caja local usuario monto motivo tipo_pago fecha')
+      .populate('usuario', 'nombre email')
+      .sort({ fecha: -1 })
+      .lean();
     const porVenta = devoluciones.reduce((acc, devolucion) => {
       const ventaId = String(devolucion.venta);
       acc[ventaId] = acc[ventaId] || [];
@@ -294,7 +309,7 @@ router.get('/', async (req, res) => {
       return acc;
     }, {});
     res.json(ventas.map((venta) => ({
-      ...venta.toObject(),
+      ...venta,
       devoluciones: porVenta[String(venta._id)] || []
     })));
   } catch (err) {
@@ -420,8 +435,12 @@ router.get('/resumen', async (req, res) => {
     };
 
     const [ventasPos, ventasWeb] = await Promise.all([
-      Venta.find(filtro),
+      Venta.find(filtro)
+        .select('productos total tipo_pago pagos fecha numero_pedido')
+        .lean(),
       VentaCliente.find(filtroWeb)
+        .select('productos total tipo_pago pagos fecha numero_pedido estado_pedido')
+        .lean()
     ]);
     const ventasConsolidadas = consolidarVentas(ventasPos, ventasWeb);
 
@@ -510,8 +529,12 @@ router.get('/resumen-rango', async (req, res) => {
     };
 
     const [ventasPos, ventasWeb] = await Promise.all([
-      Venta.find(filtro),
+      Venta.find(filtro)
+        .select('productos total tipo_pago pagos fecha numero_pedido')
+        .lean(),
       VentaCliente.find(filtroWeb)
+        .select('productos total tipo_pago pagos fecha numero_pedido estado_pedido')
+        .lean()
     ]);
     const ventasConsolidadas = consolidarVentas(ventasPos, ventasWeb);
 

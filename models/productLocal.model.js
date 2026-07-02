@@ -43,6 +43,7 @@ const productLocalSchema = new mongoose.Schema(
 );
 
 productLocalSchema.index({ productoBase: 1, local: 1 }, { unique: true });
+productLocalSchema.index({ local: 1, creado_en: -1 });
 
 productLocalSchema.virtual('stock_total').get(function () {
   if (Array.isArray(this.variantes) && this.variantes.length > 0) {

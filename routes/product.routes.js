@@ -616,8 +616,10 @@ router.post('/local/use-base/:baseId', async (req, res) => {
 router.get('/', async (_req, res) => {
   try {
     const locales = await ProductoLocal.find({ local: _req.localId })
+      .select('local activo precio stock agregados variantes creado_en productoBase')
       .populate({
         path: 'productoBase',
+        select: 'nombre descripcion imagen_url cloudinary_id categoria variantes',
         populate: { path: 'categoria', select: 'nombre parent', match: { local: _req.localId } }
       })
       .populate({
@@ -628,7 +630,8 @@ router.get('/', async (_req, res) => {
           { path: 'grupos', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' }
         ]
       })
-      .sort({ creado_en: -1 });
+      .sort({ creado_en: -1 })
+      .lean({ virtuals: true });
 
     const agregadosPorProducto = await combinarAgregadosPorReglas(_req.localId, locales);
 
@@ -647,17 +650,22 @@ router.get('/:id', async (req, res) => {
     const productoLocal = await ProductoLocal.findOne({
       _id: req.params.id,
       local: req.localId
-    }).populate({
+    })
+      .select('local activo precio stock agregados variantes creado_en productoBase')
+      .populate({
       path: 'productoBase',
+      select: 'nombre descripcion imagen_url cloudinary_id categoria variantes',
       populate: { path: 'categoria', select: 'nombre parent', match: { local: req.localId } }
-    }).populate({
+    })
+      .populate({
       path: 'agregados',
       select: 'nombre precio activo grupo grupos',
       populate: [
         { path: 'grupo', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' },
         { path: 'grupos', select: 'categoriaPrincipal titulo modoSeleccion obligatorio' }
       ]
-    });
+    })
+      .lean({ virtuals: true });
     if (productoLocal) {
       const agregadosPorProducto = await combinarAgregadosPorReglas(req.localId, [productoLocal]);
       return res.json(
