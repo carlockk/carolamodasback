@@ -13,6 +13,8 @@ const { sanitizeText, sanitizeOptionalText, toNumberOrNull } = require('../utils
 const { sendMail } = require('../utils/mailer');
 const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope');
 
+const ENABLE_STOCK_MINIMO_ALERTS = false;
+
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() });
 router.use(adjuntarScopeLocal);
@@ -525,6 +527,9 @@ router.put('/:id/estado', async (req, res) => {
 
 router.get('/alertas/config', async (req, res) => {
   try {
+    if (!ENABLE_STOCK_MINIMO_ALERTS) {
+      return res.json({ usuarios: [], disabled: true });
+    }
     const config = await InsumoAlertaConfig.findOne({ local: req.localId });
     res.json({ usuarios: config?.usuarios || [] });
   } catch (error) {
@@ -534,6 +539,9 @@ router.get('/alertas/config', async (req, res) => {
 
 router.put('/alertas/config', async (req, res) => {
   try {
+    if (!ENABLE_STOCK_MINIMO_ALERTS) {
+      return res.json({ usuarios: [], disabled: true });
+    }
     if (req.userRole !== 'superadmin') {
       return res.status(403).json({ error: 'No autorizado' });
     }
@@ -560,6 +568,9 @@ router.put('/alertas/config', async (req, res) => {
 
 router.post('/alertas/resumen', async (req, res) => {
   try {
+    if (!ENABLE_STOCK_MINIMO_ALERTS) {
+      return res.json({ mensaje: 'Alertas de stock minimo desactivadas', disabled: true });
+    }
     if (req.userRole !== 'superadmin') {
       return res.status(403).json({ error: 'No autorizado' });
     }
@@ -1454,6 +1465,7 @@ router.post('/:id/movimientos', async (req, res) => {
 
     setImmediate(async () => {
       try {
+        if (!ENABLE_STOCK_MINIMO_ALERTS) return;
         const destinatarios = await obtenerDestinatarios(req.localId);
         if (destinatarios.length === 0) return;
 
