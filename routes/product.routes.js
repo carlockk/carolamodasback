@@ -646,6 +646,20 @@ router.get('/', async (_req, res) => {
   }
 });
 
+router.get('/mermas', async (req, res) => {
+  try {
+    const mermas = await ProductoMerma.find({ local: req.localId })
+      .populate('usuario', 'nombre email')
+      .populate('productoBase', 'nombre')
+      .sort({ creado_en: -1 })
+      .lean();
+
+    return res.json(mermas);
+  } catch (err) {
+    return res.status(500).json({ error: 'No se pudo obtener el historial de mermas' });
+  }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const productoLocal = await ProductoLocal.findOne({
