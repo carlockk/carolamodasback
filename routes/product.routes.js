@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const multer = require('multer');
 const ProductoBase = require('../models/productBase.model.js');
 const ProductoLocal = require('../models/productLocal.model.js');
+const ProductoMerma = require('../models/productMerma.model.js');
 const Categoria = require('../models/categoria.model.js');
 const Agregado = require('../models/agregado.model');
 const { subirImagen, eliminarImagen } = require('../utils/cloudinary');
@@ -972,6 +973,128 @@ router.put('/:id', upload.single('imagen'), async (req, res) => {
   } catch (err) {
     console.error('❌ Error al editar producto:', err);
     res.status(400).json({ error: err.message });
+  }
+});
+
+router.post('/:id/mermas', async (req, res) => {
+  try {
+    if (!['admin', 'superadmin'].includes(req.userRole)) {
+      return res.status(403).json({ error: 'No tienes permisos para registrar mermas' });
+    }
+
+    const productoLocal = await ProductoLocal.findOne({
+      _id: req.params.id,
+      local: req.localId
+    }).populate('productoBase', 'nombre');
+
+    if (!productoLocal) {
+      return res.status(404).json({ error: 'Producto no encontrado' });
+    }
+
+    const cantidad = Number(req.body?.cantidad);
+    if (!Number.isFinite(cantidad) || cantidad <= 0) {
+      throw new Error('La cantidad a mermar debe ser mayor a 0');
+    }
+
+    const cantidadEntera = Math.floor(cantidad);
+    if (cantidadEntera !== cantidad) {
+      throw new Error('La cantidad a mermar debe ser un numero entero');
+    }
+
+    const nota = sanitizeOptionalText(req.body?.nota, { max: 300 }) || '';
+    const tieneVariantes = Array.isArray(productoLocal.variantes) && productoLocal.variantes.length > 0;
+
+    let stockAntes = 0;
+    let stockDespues = 0;
+    let varianteId = null;
+    let varianteNombre = '';
+
+    if (tieneVariantes) {
+      const varianteIdRaw = String(req.body?.varianteId || '').trim();
+      if (!varianteIdRaw) {
+        throw new Error('Debes seleccionar una variante');
+      }
+
+      const variante = productoLocal.variantes.id(varianteIdRaw);
+      if (!variante) {
+        throw new Error('La variante seleccionada no existe');
+      }
+
+      if (variante.stock === null || variante.stock === undefined || variante.stock === '') {
+        throw new Error('La variante no tiene stock controlado');
+      }
+
+      stockAntes = Number(variante.stock) || 0;
+      if (cantidadEntera > stockAntes) {
+        throw new Error(`No puedes mermar ${cantidadEntera}. Stock disponible: ${stockAntes}`);
+      }
+
+      stockDespues = stockAntes - cantidadEntera;
+      variante.stock = stockDespues;
+      variante.agotado = stockDespues === 0;
+      varianteId = variante._id;
+      varianteNombre = variante.nombre || '';
+      productoLocal.stock = calcularStockTotal(productoLocal.variantes, productoLocal.stock);
+    } else {
+      if (productoLocal.stock === null || productoLocal.stock === undefined || productoLocal.stock === '') {
+        throw new Error('El producto no tiene stock controlado');
+      }
+
+      stockAntes = Number(productoLocal.stock) || 0;
+      if (cantidadEntera > stockAntes) {
+        throw new Error(`No puedes mermar ${cantidadEntera}. Stock disponible: ${stockAntes}`);
+      }
+
+      stockDespues = stockAntes - cantidadEntera;
+      productoLocal.stock = stockDespues;
+    }
+
+    await productoLocal.save();
+
+    const merma = await ProductoMerma.create({
+      producto: productoLocal._id,
+      productoBase: productoLocal.productoBase?._id || null,
+      varianteId,
+      varianteNombre,
+      local: req.localId,
+      cantidad: cantidadEntera,
+      stock_antes: stockAntes,
+      stock_despues: stockDespues,
+      nota,
+      usuario: req.userId || null
+    });
+
+    return res.json({
+      mensaje: 'Merma registrada correctamente',
+      mermaId: merma._id
+    });
+  } catch (err) {
+    return res.status(400).json({ error: err.message || 'No se pudo registrar la merma' });
+  }
+});
+
+router.get('/:id/mermas', async (req, res) => {
+  try {
+    const productoLocal = await ProductoLocal.findOne({
+      _id: req.params.id,
+      local: req.localId
+    }).populate('productoBase', 'nombre');
+
+    if (!productoLocal) {
+      return res.status(404).json({ error: 'Producto no encontrado' });
+    }
+
+    const mermas = await ProductoMerma.find({
+      producto: productoLocal._id,
+      local: req.localId
+    })
+      .populate('usuario', 'nombre email')
+      .sort({ creado_en: -1 })
+      .lean();
+
+    return res.json(mermas);
+  } catch (err) {
+    return res.status(500).json({ error: 'No se pudo obtener el historial de mermas' });
   }
 });
 
