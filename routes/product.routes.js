@@ -1,6 +1,8 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const multer = require('multer');
+const { gzip } = require('zlib');
+const { promisify } = require('util');
 const ProductoBase = require('../models/productBase.model.js');
 const ProductoLocal = require('../models/productLocal.model.js');
 const ProductoMerma = require('../models/productMerma.model.js');
@@ -12,6 +14,7 @@ const { adjuntarScopeLocal, requiereLocal } = require('../middlewares/localScope
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage() }); // Guarda la imagen temporalmente en memoria
+const gzipAsync = promisify(gzip);
 router.use(adjuntarScopeLocal);
 router.use(requiereLocal);
 
@@ -646,11 +649,18 @@ router.get('/', async (_req, res) => {
 
     const agregadosPorProducto = await combinarAgregadosPorReglas(_req.localId, locales);
 
-    return res.json(
-      locales.map((prod) =>
-        proyectarProductoLocal(prod, agregadosPorProducto.get(String(prod._id)) || null)
-      )
+    const catalogo = locales.map((prod) =>
+      proyectarProductoLocal(prod, agregadosPorProducto.get(String(prod._id)) || null)
     );
+    const body = JSON.stringify(catalogo);
+    res.vary('Accept-Encoding');
+    res.type('json');
+    if (Buffer.byteLength(body) >= 16384 && _req.acceptsEncodings('gzip')) {
+      const comprimido = await gzipAsync(body, { level: 4 });
+      res.set('Content-Encoding', 'gzip');
+      return res.send(comprimido);
+    }
+    return res.send(body);
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener productos' });
   }

@@ -298,7 +298,8 @@ router.get('/', async (req, res) => {
     }
     const insumos = await Insumo.find(filtro)
       .populate('categoria', 'nombre')
-      .sort({ orden: 1, nombre: 1 });
+      .sort({ orden: 1, nombre: 1 })
+      .lean();
     res.json(insumos);
   } catch (error) {
     res.status(500).json({ error: 'Error al obtener insumos' });
