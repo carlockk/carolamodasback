@@ -78,5 +78,7 @@ const ventaSchema = new mongoose.Schema({
 });
 
 ventaSchema.index({ local: 1, estado: 1, 'anulacion.fecha': -1 });
+ventaSchema.index({ local: 1, fecha: -1, _id: -1 });
+ventaSchema.index({ local: 1, usuario: 1, fecha: -1, _id: -1 });
 
 module.exports = mongoose.model('Venta', ventaSchema);

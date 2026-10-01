@@ -269,13 +269,11 @@ const armarDesglosePorTipoPago = (ventas = []) => {
  *     tags: [Ventas]
  *     responses:
  *       200:
- *         description: Lista de ventas ordenadas por fecha descendente
+ *         description: Bloque de ventas ordenadas por fecha descendente y cursor para el siguiente bloque
  *         content:
  *           application/json:
  *             schema:
- *               type: array
- *               items:
- *                 type: object
+ *               type: object
  *       500:
  *         description: Error interno del servidor
  */
@@ -288,34 +286,85 @@ router.get('/', async (req, res) => {
       }
       filtro.usuario = req.userId;
     }
+    const limite = Math.min(Math.max(Number.parseInt(req.query.limite, 10) || 50, 1), 50);
+    const desde = req.query.desde ? new Date(req.query.desde) : null;
+    const hasta = req.query.hasta ? new Date(req.query.hasta) : null;
+    if ((desde && Number.isNaN(desde.getTime())) || (hasta && Number.isNaN(hasta.getTime()))) {
+      return res.status(400).json({ error: 'Filtro de fecha invalido' });
+    }
+    if (desde || hasta) {
+      filtro.fecha = {};
+      if (desde) filtro.fecha.$gte = desde;
+      if (hasta) filtro.fecha.$lt = hasta;
+    }
+
+    const busqueda = sanitizeText(req.query.buscar, { max: 80 });
+    if (busqueda) {
+      const patron = new RegExp(busqueda.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      const numeros = /^\d+$/.test(busqueda)
+        ? Array.from({ length: 100 }, (_, numero) => numero).filter((numero) => String(numero).includes(busqueda))
+        : [];
+      filtro.$or = [
+        { 'productos.nombre': patron },
+        { 'productos.varianteNombre': patron },
+        ...(numeros.length ? [{ numero_pedido: { $in: numeros } }] : [])
+      ];
+    }
+
+    if (req.query.cursorFecha || req.query.cursorId) {
+      const cursorFecha = new Date(req.query.cursorFecha);
+      if (!req.query.cursorFecha || !mongoose.Types.ObjectId.isValid(req.query.cursorId) || Number.isNaN(cursorFecha.getTime())) {
+        return res.status(400).json({ error: 'Cursor invalido' });
+      }
+      filtro.$and = [{ $or: [
+        { fecha: { $lt: cursorFecha } },
+        { fecha: cursorFecha, _id: { $lt: new mongoose.Types.ObjectId(req.query.cursorId) } }
+      ] }];
+    }
 
     const ventas = await Venta.find(filtro)
-      .select('productos subtotal descuento_total descuento_venta total tipo_pago pagos tipo_pedido monto_recibido vuelto fecha numero_pedido local usuario origen_cobro estado anulacion caja')
+      .select('numero_pedido fecha total tipo_pago usuario cobrador_nombre estado')
+      .populate('usuario', 'nombre email')
+      .sort({ fecha: -1, _id: -1 })
+      .limit(limite + 1)
+      .lean();
+    const hayMas = ventas.length > limite;
+    const items = hayMas ? ventas.slice(0, limite) : ventas;
+    const ultima = items.at(-1);
+    return res.json({
+      items,
+      siguiente: hayMas ? { fecha: ultima.fecha.toISOString(), id: String(ultima._id) } : null
+    });
+  } catch (err) {
+    console.error('Error al obtener historial:', err);
+    res.status(500).json({ error: 'Error interno al obtener historial' });
+  }
+});
+
+router.get('/detalle/:id', async (req, res) => {
+  try {
+    if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+      return res.status(400).json({ error: 'Venta invalida' });
+    }
+    const filtro = { _id: req.params.id, local: req.localId };
+    if (req.userRole === 'cajero') {
+      if (!req.userId) return res.status(400).json({ error: 'Usuario requerido' });
+      filtro.usuario = req.userId;
+    }
+    const venta = await Venta.findOne(filtro)
       .populate('usuario', 'nombre email rol')
       .populate('anulacion.usuario', 'nombre email')
-      .sort({ fecha: -1 })
       .lean();
-    const devoluciones = await Devolucion.find({
-      venta: { $in: ventas.map((venta) => venta._id) },
-      local: req.localId
-    })
+    if (!venta) return res.status(404).json({ error: 'Venta no encontrada' });
+    const devoluciones = await Devolucion.find({ venta: venta._id, local: req.localId })
       .select('venta caja local usuario monto motivo tipo_pago fecha')
       .populate('usuario', 'nombre email')
       .sort({ fecha: -1 })
       .lean();
-    const porVenta = devoluciones.reduce((acc, devolucion) => {
-      const ventaId = String(devolucion.venta);
-      acc[ventaId] = acc[ventaId] || [];
-      acc[ventaId].push(devolucion);
-      return acc;
-    }, {});
-    res.json(ventas.map((venta) => ({
-      ...venta,
-      devoluciones: porVenta[String(venta._id)] || []
-    })));
+    return res.json({ ...venta, devoluciones });
   } catch (err) {
-    console.error('Error al obtener historial:', err);
-    res.status(500).json({ error: 'Error interno al obtener historial' });
+    console.error('Error al obtener detalle de venta:', err);
+    return res.status(500).json({ error: 'No se pudo obtener el ticket' });
   }
 });
 
