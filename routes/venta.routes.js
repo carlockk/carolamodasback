@@ -290,8 +290,9 @@ router.get('/', async (req, res) => {
     }
 
     const ventas = await Venta.find(filtro)
-      .select('productos subtotal descuento_total descuento_venta total tipo_pago pagos tipo_pedido monto_recibido vuelto fecha numero_pedido local usuario')
+      .select('productos subtotal descuento_total descuento_venta total tipo_pago pagos tipo_pedido monto_recibido vuelto fecha numero_pedido local usuario origen_cobro estado anulacion caja')
       .populate('usuario', 'nombre email rol')
+      .populate('anulacion.usuario', 'nombre email')
       .sort({ fecha: -1 })
       .lean();
     const devoluciones = await Devolucion.find({
@@ -318,7 +319,140 @@ router.get('/', async (req, res) => {
   }
 });
 
+router.get('/anulaciones', async (req, res) => {
+  try {
+    if (!['admin', 'superadmin'].includes(req.userRole)) {
+      return res.status(403).json({ error: 'No tienes permisos para ver anulaciones' });
+    }
+    const ventas = await Venta.find({ local: req.localId, estado: 'anulada' })
+      .select('numero_pedido fecha productos subtotal descuento_total descuento_venta total tipo_pago pagos tipo_pedido monto_recibido vuelto usuario anulacion estado')
+      .populate('usuario', 'nombre email')
+      .populate('anulacion.usuario', 'nombre email')
+      .sort({ 'anulacion.fecha': -1 })
+      .lean();
+    return res.json(ventas);
+  } catch (err) {
+    console.error('Error al obtener anulaciones:', err);
+    return res.status(500).json({ error: 'No se pudieron obtener las anulaciones' });
+  }
+});
+
+router.post('/:id/anular', async (req, res) => {
+  if (!['admin', 'superadmin'].includes(req.userRole)) {
+    return res.status(403).json({ error: 'No tienes permisos para anular ventas' });
+  }
+  if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
+    return res.status(400).json({ error: 'Venta invalida' });
+  }
+  const motivo = sanitizeText(req.body?.motivo, { max: 300 });
+  if (!motivo) return res.status(400).json({ error: 'El motivo de anulacion es obligatorio' });
+
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+    const venta = await Venta.findOne({ _id: req.params.id, local: req.localId }).session(session);
+    if (!venta) {
+      const error = new Error('Venta no encontrada');
+      error.status = 404;
+      throw error;
+    }
+    if (venta.estado === 'anulada') {
+      const error = new Error('La venta ya fue anulada');
+      error.status = 409;
+      throw error;
+    }
+    if (venta.origen_cobro !== 'pos') {
+      const error = new Error('Solo se pueden anular ventas del POS desde esta opcion');
+      error.status = 400;
+      throw error;
+    }
+
+    const caja = await Caja.findOne({ cierre: null, local: req.localId }).session(session);
+    if (!caja || (venta.caja && String(venta.caja) !== String(caja._id)) ||
+        (!venta.caja && new Date(venta.fecha) < new Date(caja.apertura))) {
+      const error = new Error('Solo puedes anular ventas de la caja que sigue abierta');
+      error.status = 409;
+      throw error;
+    }
+    if (await Devolucion.exists({ venta: venta._id, local: req.localId }).session(session)) {
+      const error = new Error('La venta tiene devoluciones registradas y no se puede anular');
+      error.status = 409;
+      throw error;
+    }
+
+    const anulacion = { fecha: new Date(), motivo, usuario: req.userId || null, caja: caja._id };
+    const marcada = await Venta.findOneAndUpdate(
+      { _id: venta._id, local: req.localId, estado: { $ne: 'anulada' } },
+      { $set: { estado: 'anulada', anulacion } },
+      { session, new: true }
+    );
+    if (!marcada) {
+      const error = new Error('La venta ya fue anulada');
+      error.status = 409;
+      throw error;
+    }
+
+    for (const item of venta.productos) {
+      if (item.stock_descontado === false) continue;
+      const producto = await ProductoLocal.findOne({ _id: item.productoId, local: req.localId }).session(session);
+      if (!producto) {
+        const error = new Error(`No se pudo reponer el stock de ${item.nombre}: producto eliminado`);
+        error.status = 409;
+        throw error;
+      }
+      const cantidad = Number(item.cantidad) || 0;
+      if (item.varianteId) {
+        const variante = producto.variantes.id(item.varianteId);
+        if (!variante) {
+          const error = new Error(`No se pudo reponer el stock de ${item.nombre}: variante eliminada`);
+          error.status = 409;
+          throw error;
+        }
+        if (typeof variante.stock !== 'number' || !Number.isFinite(variante.stock)) {
+          if (item.stock_descontado === true) {
+            const error = new Error(`No se pudo reponer el stock de ${item.nombre}: variante sin control de stock`);
+            error.status = 409;
+            throw error;
+          }
+          continue;
+        }
+        variante.stock += cantidad;
+        producto.stock = calcularStockDesdeVariantes(producto.variantes);
+      } else {
+        if (producto.variantes.length > 0) {
+          const error = new Error(`No se pudo reponer el stock de ${item.nombre}: ahora tiene variantes`);
+          error.status = 409;
+          throw error;
+        }
+        if (typeof producto.stock !== 'number' || !Number.isFinite(producto.stock)) {
+          if (item.stock_descontado === true) {
+            const error = new Error(`No se pudo reponer el stock de ${item.nombre}: sin control de stock`);
+            error.status = 409;
+            throw error;
+          }
+          continue;
+        }
+        producto.stock += cantidad;
+      }
+      await producto.save({ session });
+    }
+
+    await session.commitTransaction();
+    return res.json({ mensaje: 'Venta anulada', venta: marcada });
+  } catch (err) {
+    await session.abortTransaction().catch(() => {});
+    console.error('Error al anular venta:', err);
+    const conflicto = err.code === 112 || err.codeName === 'WriteConflict';
+    return res.status(err.status || (conflicto ? 409 : 500)).json({
+      error: conflicto ? 'La venta o el stock cambió durante la anulación. Intenta nuevamente.' : (err.message || 'No se pudo anular la venta')
+    });
+  } finally {
+    session.endSession();
+  }
+});
+
 router.post('/:id/devoluciones', async (req, res) => {
+  let session;
   try {
     if (!mongoose.Types.ObjectId.isValid(req.params.id)) {
       return res.status(400).json({ error: 'Venta invalida' });
@@ -333,24 +467,39 @@ router.post('/:id/devoluciones', async (req, res) => {
     if (!motivo) return res.status(400).json({ error: 'El motivo es obligatorio' });
     if (!tipoPago) return res.status(400).json({ error: 'El medio de devolucion es obligatorio' });
 
-    const [venta, caja] = await Promise.all([
-      Venta.findOne({ _id: req.params.id, local: req.localId }),
-      Caja.findOne({ cierre: null, local: req.localId })
-    ]);
-    if (!venta) return res.status(404).json({ error: 'Venta no encontrada' });
-    if (!caja) return res.status(400).json({ error: 'Debes tener una caja abierta para devolver dinero' });
+    session = await mongoose.startSession();
+    session.startTransaction();
+    const venta = await Venta.findOneAndUpdate(
+      { _id: req.params.id, local: req.localId, estado: { $ne: 'anulada' } },
+      { $inc: { revision: 1 } },
+      { session, new: true }
+    );
+    if (!venta) {
+      const existente = await Venta.exists({ _id: req.params.id, local: req.localId }).session(session);
+      const error = new Error(existente ? 'La venta ya esta anulada' : 'Venta no encontrada');
+      error.status = existente ? 409 : 404;
+      throw error;
+    }
+    const caja = await Caja.findOne({ cierre: null, local: req.localId }).session(session);
+    if (!caja) {
+      const error = new Error('Debes tener una caja abierta para devolver dinero');
+      error.status = 400;
+      throw error;
+    }
 
     const acumulado = await Devolucion.aggregate([
       { $match: { venta: venta._id, local: new mongoose.Types.ObjectId(req.localId) } },
       { $group: { _id: null, total: { $sum: '$monto' } } }
-    ]);
+    ]).session(session);
     const yaDevuelto = Number(acumulado[0]?.total) || 0;
     const disponible = Math.max(0, (Number(venta.total) || 0) - yaDevuelto);
     if (monto > disponible) {
-      return res.status(400).json({ error: `El monto supera el saldo disponible de $${disponible.toLocaleString('es-CL')}` });
+      const error = new Error(`El monto supera el saldo disponible de $${disponible.toLocaleString('es-CL')}`);
+      error.status = 400;
+      throw error;
     }
 
-    const devolucion = await Devolucion.create({
+    const devolucion = new Devolucion({
       venta: venta._id,
       caja: caja._id,
       local: req.localId,
@@ -359,6 +508,8 @@ router.post('/:id/devoluciones', async (req, res) => {
       motivo,
       tipo_pago: tipoPago
     });
+    await devolucion.save({ session });
+    await session.commitTransaction();
 
     res.status(201).json({
       mensaje: 'Devolucion registrada',
@@ -367,8 +518,11 @@ router.post('/:id/devoluciones', async (req, res) => {
       saldo_disponible: disponible - monto
     });
   } catch (err) {
+    if (session?.inTransaction()) await session.abortTransaction().catch(() => {});
     console.error('Error al registrar devolucion:', err);
-    res.status(500).json({ error: 'No se pudo registrar la devolucion' });
+    res.status(err.status || (err.code === 112 ? 409 : 500)).json({ error: err.status ? err.message : 'No se pudo registrar la devolucion. Intenta nuevamente.' });
+  } finally {
+    if (session) session.endSession();
   }
 });
 
@@ -419,7 +573,8 @@ router.get('/resumen', async (req, res) => {
 
     const filtro = {
       fecha: { $gte: inicio, $lte: fin },
-      local: req.localId
+      local: req.localId,
+      estado: { $ne: 'anulada' }
     };
     if (req.userRole === 'cajero') {
       if (!req.userId) {
@@ -513,7 +668,8 @@ router.get('/resumen-rango', async (req, res) => {
 
     const filtro = {
       fecha: { $gte: fechaInicio, $lte: fechaFin },
-      local: req.localId
+      local: req.localId,
+      estado: { $ne: 'anulada' }
     };
     if (req.userRole === 'cajero') {
       if (!req.userId) {
@@ -712,6 +868,7 @@ router.post('/', async (req, res) => {
 
       const usaVariantes = Array.isArray(producto.variantes) && producto.variantes.length > 0;
       let varianteSeleccionada = null;
+      let stockDescontado = false;
 
       if (item.varianteId) {
         varianteSeleccionada = producto.variantes.id(item.varianteId);
@@ -743,6 +900,7 @@ router.post('/', async (req, res) => {
 
           varianteSeleccionada.stock -= cantidadSolicitada;
           producto.stock = calcularStockDesdeVariantes(producto.variantes);
+          stockDescontado = true;
         }
       } else {
         const controlaStock = typeof producto.stock === 'number' && !Number.isNaN(producto.stock);
@@ -754,6 +912,7 @@ router.post('/', async (req, res) => {
           }
 
           producto.stock -= cantidadSolicitada;
+          stockDescontado = true;
         }
       }
 
@@ -785,6 +944,7 @@ router.post('/', async (req, res) => {
         precio_original: precioOriginal,
         descuento: snapshotDescuento(descuentoItem, montoDescuentoUnitario),
         cantidad: cantidadSolicitada,
+        stock_descontado: stockDescontado,
         observacion: sanitizeOptionalText(item.observacion, { max: 120 }) || '',
         varianteId: varianteSeleccionada?._id || null,
         varianteNombre: item.varianteNombre || varianteSeleccionada?.nombre || null,
@@ -817,6 +977,7 @@ router.post('/', async (req, res) => {
       fecha: new Date(),
       numero_pedido: Math.floor(Math.random() * 100),
       local: req.localId,
+      caja: cajaAbierta._id,
       usuario: req.userId || null
     });
 

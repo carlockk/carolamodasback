@@ -16,6 +16,7 @@ const ventaSchema = new mongoose.Schema({
         monto: Number
       },
       cantidad: Number,
+      stock_descontado: Boolean,
       observacion: String,
       varianteId: mongoose.Schema.Types.ObjectId,
       varianteNombre: String,
@@ -61,10 +62,21 @@ const ventaSchema = new mongoose.Schema({
   rendido_en: { type: Date, default: null },
   usuario: { type: mongoose.Schema.Types.ObjectId, ref: 'Usuario', default: null },
   local: { type: mongoose.Schema.Types.ObjectId, ref: 'Local', default: null },
+  caja: { type: mongoose.Schema.Types.ObjectId, ref: 'Caja', default: null },
+  revision: { type: Number, default: 0 },
+  estado: { type: String, enum: ['vigente', 'anulada'], default: 'vigente' },
+  anulacion: {
+    fecha: Date,
+    motivo: String,
+    usuario: { type: mongoose.Schema.Types.ObjectId, ref: 'Usuario' },
+    caja: { type: mongoose.Schema.Types.ObjectId, ref: 'Caja' }
+  },
   fecha: {
     type: Date,
     default: () => new Date()
   }
 });
+
+ventaSchema.index({ local: 1, estado: 1, 'anulacion.fecha': -1 });
 
 module.exports = mongoose.model('Venta', ventaSchema);

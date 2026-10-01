@@ -95,7 +95,7 @@ router.post('/cerrar', async (req, res) => {
 
     const cierre = new Date();
     const [ventas, devoluciones] = await Promise.all([
-      Venta.find({ fecha: { $gte: caja.apertura, $lte: cierre }, local: req.localId }),
+      Venta.find({ fecha: { $gte: caja.apertura, $lte: cierre }, local: req.localId, estado: { $ne: 'anulada' } }),
       Devolucion.find({ fecha: { $gte: caja.apertura, $lte: cierre }, local: req.localId })
         .populate('venta', 'numero_pedido')
         .populate('usuario', 'nombre email')
