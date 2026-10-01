@@ -430,20 +430,30 @@ const combinarAgregadosPorReglas = async (localId, productosLocales = []) => {
     .lean();
 
   const porProductoId = new Map();
+  const productosPorCategoria = new Map();
+  const productosValidos = new Set();
+
+  productosLocales.forEach((prod) => {
+    const prodId = String(prod._id);
+    productosValidos.add(prodId);
+    const categoriaId = getObjectIdString(prod?.productoBase?.categoria);
+    if (!categoriaId) return;
+    if (!productosPorCategoria.has(categoriaId)) productosPorCategoria.set(categoriaId, []);
+    productosPorCategoria.get(categoriaId).push(prodId);
+  });
 
   autoAgregados.forEach((agg) => {
     const aggId = String(agg._id);
-    const productosSet = new Set((agg.productos || []).map((id) => String(id)));
-    const categoriasSet = new Set((agg.categorias || []).map((id) => String(id)));
+    const asociados = new Set();
+    (agg.productos || []).forEach((id) => {
+      const prodId = String(id);
+      if (productosValidos.has(prodId)) asociados.add(prodId);
+    });
+    (agg.categorias || []).forEach((id) => {
+      (productosPorCategoria.get(String(id)) || []).forEach((prodId) => asociados.add(prodId));
+    });
 
-    productosLocales.forEach((prod) => {
-      const prodId = String(prod._id);
-      const prodCategoriaId = getObjectIdString(prod?.productoBase?.categoria);
-      const aplicaPorProducto = productosSet.has(prodId);
-      const aplicaPorCategoria = prodCategoriaId && categoriasSet.has(prodCategoriaId);
-
-      if (!aplicaPorProducto && !aplicaPorCategoria) return;
-
+    asociados.forEach((prodId) => {
       if (!porProductoId.has(prodId)) porProductoId.set(prodId, new Map());
       porProductoId.get(prodId).set(aggId, agg);
     });
